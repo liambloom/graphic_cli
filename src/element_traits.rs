@@ -1,20 +1,9 @@
 use std::fmt::{self, Display};
-use crate::errors;
+use crate::{errors, measurement::*};
 
-pub mod private {
-    use super::Child;
-
-    pub trait PrivElement {
-        fn draw(&self);
-        fn children_owned(&mut self) -> &mut Vec<Box<dyn Child>>;
-    }
-}
-
-use private::*;
-
-pub trait Element: fmt::Debug + Display + PrivElement {
+pub trait Element: Display + PrivElement {
     fn children(&self) -> Vec<&dyn Child>; // Rc or Box?
-    fn children_mut(&self) -> Vec<&mut dyn Child>;
+    fn children_mut(&mut self) -> Vec<&mut dyn Child>;
     fn add_child(&mut self, child: Box<dyn Child>) -> Result<(), errors::IdAlreadyExists> {
         if self.contains_id(child.id()) { Err(errors::IdAlreadyExists) }
         else { 
@@ -67,7 +56,7 @@ pub trait Element: fmt::Debug + Display + PrivElement {
     fn contains_id(&self, id: &str) -> bool {
         self.children().iter().any(|e| e.id() == id || e.contains_id(id))
     }
-    fn index_of(&self, child: &dyn Child) -> Option<usize>;
+    //fn index_of(&self, child: &dyn Child) -> Option<usize>;
     fn child_count(&self) -> usize;
     fn id(&self) -> &str;
     fn get_child(&self, id: &str) -> Option<&dyn Child> {
@@ -98,11 +87,28 @@ pub trait Element: fmt::Debug + Display + PrivElement {
         }
         None
     }
+    fn get_width(&self) -> u16;
+    fn get_height(&self) -> u16;
+}
+
+pub trait PrivElement {
+    fn draw(&self);
+    fn children_owned(&mut self) -> &mut Vec<Box<dyn Child>>;
+    fn width_exact(&self) -> f32;
+    fn height_exact(&self) -> f32;
 }
 
 pub trait Child: Element + RemoveChild {
     fn parent(&self) -> &dyn Element;
     fn parent_mut(&self) -> &mut dyn Element;
+    fn set_width(&mut self, v: Unit);
+    fn set_height(&mut self, v: Unit);
+    /*fn remove(&mut self) {
+        match self.parent_mut().remove_child(self.id()) {
+            Ok(()) => (),
+            Err(_) => unreachable!(),
+        };
+    }*/
 }
 pub trait RemoveChild {
     fn remove(self); // This returns self. I'm pretty sure this causes every compilation error on this page
