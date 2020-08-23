@@ -1,38 +1,96 @@
 use std::{
-    io,
-    fmt::{self, Display, Formatter},
+    io::{self, Read, Write, Seek, SeekFrom, Stdout},
+    sync::atomic::AtomicBool,
+    convert::TryInto,
 };
-use crossterm::terminal::size;
+use crossterm::{
+    execute,
+    terminal::size,
+    cursor::MoveTo,
+    ExecutableCommand,
+};
 use crate::element_traits::*;
 
-static mut CONSTRUCTED: bool = false;
+static mut STDOUT_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
+static mut STDERR_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
 
-unsafe fn enforce_once() {
-    if CONSTRUCTED {
-        panic!("You may not construct a graphic_cli::elements::Document more than once");
-    }
-    else {
-        CONSTRUCTED = true;
+fn enforce_once()/* -> Result<(), >*/ {
+    unsafe {
+        if *STDOUT_DOC_EXISTS.get_mut() {
+            panic!("You may not construct a graphic_cli::elements::Document more than once");
+        }
+        else {
+            *STDOUT_DOC_EXISTS.get_mut() = true;
+        }
     }
 }
 
-pub struct Document {
-    read: Box<dyn io::Read>,
-    write: Box<dyn io::Write>,
-    bmp: Vec<Vec<todo!("Make color enum")>>,
+pub struct Document<R, W>
+    where R: Read,
+          W: Write + Seek
+{
+    read: R,
+    write: W,
+    bmp: Vec<Vec<crate::colors::RGB>>,
     children: Vec<Box<dyn Child>>,
     id: String,
     width: u16, // (1) if self.write is io::Stdout, this should use crossterm::terminal::size() (or maybe crossterm::terminal::SetSize)
     height: u16, // (2) if it's not io::Stdout,
 }
 
-impl Document {
+impl<R, W> Document<R, W>
+    where R: Read,
+          W: Write + Seek
+{
     pub unsafe fn new() {
         enforce_once();
     }
 }
 
-impl Element for Document {
+struct SeekStdout {
+    stdout: Stdout,
+}
+impl SeekStdout {
+    fn new() -> Self {
+        Self { stdout: io::stdout() }
+    }
+    fn from(stdout: Stdout) -> Self {
+        Self { stdout }
+    }
+}
+impl Write for SeekStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stdout.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.stdout.flush()
+    }
+}
+impl Seek for SeekStdout {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let columns: u16 = match size() {
+            Ok(size) => size.0,
+            Err(err) => return Err(io::Error::new(io::ErrorKind::Other, err.to_string())),
+        };
+        match pos {
+            SeekFrom::Start(p) => {
+                let p_u16: u16 = match p.try_into() {
+                    Ok(n) => n,
+                    Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidInput, err.to_string())),
+                };
+                match self.stdout.execute(MoveTo(p_u16 / columns, p_u16 / columns)) {
+                    Ok(_) => Ok(p),
+                    Err(err) => Err(io::Error::new(io::ErrorKind::Other, err.to_string())),
+                }
+            }
+        }
+    }
+}
+
+/*impl<R, W> Element for Document<R, W>
+    where R: io::Read,
+          W: io::Write
+{
     fn id(&self) -> &str {
         &self.id
     }
@@ -59,4 +117,4 @@ impl PrivElement for Document {
 
 impl Display for Document {
 
-}
+}*/
