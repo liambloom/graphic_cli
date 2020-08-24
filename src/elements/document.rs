@@ -1,60 +1,96 @@
 use std::{
-    io::{self, Read, Write, Seek, SeekFrom, Stdout},
+    io::{self, Read, Write, Seek, SeekFrom, Stdout, Stdin},
     sync::atomic::AtomicBool,
     convert::TryInto,
+    any::{Any, TypeId},
+    ops::Drop,
 };
 use crossterm::{
-    execute,
     terminal::size,
-    cursor::MoveTo,
+    cursor::{position, MoveTo},
     ExecutableCommand,
 };
-use crate::element_traits::*;
+use crate::{
+    element_traits::*,
+    Error,
+};
 
 static mut STDOUT_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
-static mut STDERR_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
+//static mut STDERR_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
 
-fn enforce_once()/* -> Result<(), >*/ {
-    unsafe {
-        if *STDOUT_DOC_EXISTS.get_mut() {
-            panic!("You may not construct a graphic_cli::elements::Document more than once");
+fn enforce_once<T: 'static>() -> Result<()/*TypeId*/, Error> {
+    let t = TypeId::of::<T>();
+    let exists = unsafe { 
+        if t == TypeId::of::<SeekStdout>() {
+            STDOUT_DOC_EXISTS.get_mut()
         }
+        /*else if t == TypeId::of::<Stdout>() {
+            STDERR_DOC_EXISTS.get_mut()
+        }*/
         else {
-            *STDOUT_DOC_EXISTS.get_mut() = true;
+            return Ok(())
         }
+    };
+    if &mut true == exists {
+        Err(Error::AlreadyExistsFor(t))
+    }
+    else {
+        *exists = true;
+        Ok(())
     }
 }
 
 pub struct Document<R, W>
     where R: Read,
-          W: Write + Seek
+          W: Write + Seek + Any
 {
     read: R,
     write: W,
     bmp: Vec<Vec<crate::colors::RGB>>,
     children: Vec<Box<dyn Child>>,
-    id: String,
     width: u16, // (1) if self.write is io::Stdout, this should use crossterm::terminal::size() (or maybe crossterm::terminal::SetSize)
     height: u16, // (2) if it's not io::Stdout,
 }
 
 impl<R, W> Document<R, W>
     where R: Read,
-          W: Write + Seek
+          W: Write + Seek + Any
 {
-    pub unsafe fn new() {
-        enforce_once();
+    pub fn default() -> Result<Document<Stdin, SeekStdout>, Error> {
+        enforce_once::<W>()?;
+        let size = size()?;
+        Ok(Document {
+            read: io::stdin(),
+            write: SeekStdout::new(),
+            bmp: Vec::new(), // This won't work
+            children: Vec::new(),
+            width: size.0,
+            height: size.1,
+        })
     }
 }
 
-struct SeekStdout {
+impl<R, W> Drop for Document<R, W>
+    where R: Read,
+          W: Write + Seek + Any
+{
+    fn drop(&mut self) {
+        if TypeId::of::<W>() == TypeId::of::<SeekStdout>() {
+            unsafe {
+                *STDOUT_DOC_EXISTS.get_mut() = false;
+            }
+        }
+    }
+}
+
+pub struct SeekStdout {
     stdout: Stdout,
 }
 impl SeekStdout {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self { stdout: io::stdout() }
     }
-    fn from(stdout: Stdout) -> Self {
+    pub fn from(stdout: Stdout) -> Self {
         Self { stdout }
     }
 }
@@ -68,22 +104,39 @@ impl Write for SeekStdout {
 }
 impl Seek for SeekStdout {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let columns: u16 = match size() {
-            Ok(size) => size.0,
-            Err(err) => return Err(io::Error::new(io::ErrorKind::Other, err.to_string())),
-        };
+        let size = unwrap_io(size())?;
         match pos {
-            SeekFrom::Start(p) => {
-                let p_u16: u16 = match p.try_into() {
-                    Ok(n) => n,
-                    Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidInput, err.to_string())),
-                };
-                match self.stdout.execute(MoveTo(p_u16 / columns, p_u16 / columns)) {
-                    Ok(_) => Ok(p),
-                    Err(err) => Err(io::Error::new(io::ErrorKind::Other, err.to_string())),
-                }
+            SeekFrom::Start(p) => move_to(&mut self.stdout, to_u16(p)?, size.0),
+            SeekFrom::End(p) => move_to(&mut self.stdout, to_u16(p)? + size.0 * size.1, size.0),
+            SeekFrom::Current(p) => {
+                let current = unwrap_io(position())?;
+                move_to(&mut self.stdout, to_u16(p)? + size.0 * (current.1 - 1) + current.0, size.0)
             }
         }
+    }
+}
+
+fn to_u16<T, E>(n: T) -> Result<u16, io::Error> 
+    where T: TryInto<u16, Error = E>,
+          E: ToString
+{
+    match n.try_into() {
+        Ok(n) => Ok(n),
+        Err(err) => Err(io::Error::new(io::ErrorKind::InvalidInput, err.to_string())),
+    }
+}
+
+fn unwrap_io<T, E: ToString>(r: Result<T, E>) -> io::Result<T> {
+    match r {
+        Ok(val) => Ok(val),
+        Err(err) => Err(io::Error::new(io::ErrorKind::Other, err.to_string())),
+    }
+}
+
+fn move_to(stdout: &mut Stdout, to: u16, cols: u16) -> Result<u64, io::Error> {
+    match stdout.execute(MoveTo(to % cols, to / cols)) {
+        Ok(_) => Ok(to.into()),
+        Err(err) => Err(io::Error::new(io::ErrorKind::Other, err.to_string())),
     }
 }
 

@@ -1,8 +1,3 @@
-macro_rules! export_element {
-    ($name:ident) => {
-        mod $name;
-        pub use $name::*;
-    };
-}
+#![macro_use]
 
-export_element!(document);
+export_children!(document);

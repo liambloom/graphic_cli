@@ -1,26 +1,30 @@
-use std::fmt::{self, Display};
-use crate::{errors, measurement::*};
+use std::fmt::Display;
+use crate::{
+    Error, 
+    measurement::*,
+};
 
 pub trait Element: Display + PrivElement {
+    fn doc(&self) -> &dyn Element; // In order to return the type Document<R, W> it must know R and W, so Element would have to have 2 generic types
     fn children(&self) -> Vec<&dyn Child>; // Rc or Box?
     fn children_mut(&mut self) -> Vec<&mut dyn Child>;
-    fn add_child(&mut self, child: Box<dyn Child>) -> Result<(), errors::IdAlreadyExists> {
-        if self.contains_id(child.id()) { Err(errors::IdAlreadyExists) }
-        else { 
+    fn add_child(&mut self, child: Box<dyn Child>) -> Result<(), Error> {
+        if self.doc().contains_id(child.id()) { Err(Error::IdAlreadyExists(child.id().to_string())) }
+        else {
             self.children_owned().push(child);
             Ok(())
         }
     }
-    fn remove_child(&mut self, id: &str) -> Result<(), errors::ChildNotFound> {
+    fn remove_child(&mut self, id: &str) -> Result<(), Error> {
         let children = self.children_owned();
-        children.remove(children.iter().position(|e| e.id() == id).ok_or(errors::ChildNotFound)?);
+        children.remove(children.iter().position(|e| e.id() == id).ok_or(Error::ChildNotFound(id.to_string()))?);
         Ok(())
     }
     /* {
         self.add_child_at(child, self.child_count())
     }*/
-    //fn add_child_at(&mut self, child: Box<dyn Element>, i: usize);
-    fn add_child_after<'a>(&mut self, child: Box<dyn Element>, relative: &'a dyn Element) -> Result<(), errors::ChildNotFound> {
+    //fn add_child_at(&mut self, child: Box<dyn Child>, i: usize);
+    fn add_child_after(&mut self, child: Box<dyn Child>, relative: &dyn Child) -> Result<(), Error> {
         unimplemented!();
         /*match self.index_of(&*child) {
             Some(i) => {
@@ -30,7 +34,7 @@ pub trait Element: Display + PrivElement {
             None => Err(ChildNotFound::InsertBefore(relative))
         }*/
     }
-    fn add_child_before<'a>(&mut self, child: Box<dyn Element>, relative: &'a dyn Element) -> Result<(), errors::ChildNotFound> {
+    fn add_child_before(&mut self, child: Box<dyn Child>, relative: &dyn Child) -> Result<(), Error> {
         unimplemented!();
         /*match self.index_of(&*child) {
             Some(i) => {
@@ -41,7 +45,7 @@ pub trait Element: Display + PrivElement {
         }*/
     }
     //fn remove_child_at(&mut self, i: usize);
-    /*fn remove_child(&mut self, child: Box<dyn Element>) -> Result<(), ChildNotFound> {
+    /*fn remove_child(&mut self, child: Box<dyn Child>) -> Result<(), ChildNotFound> {
         match self.index_of(&*child) {
             Some(i) => {
                 self.remove_child_at(i);
@@ -50,7 +54,7 @@ pub trait Element: Display + PrivElement {
             None => Err(ChildNotFound::Remove(child))
         }
     }*/
-    fn contains(&self, child: &dyn Element) -> bool {
+    fn contains(&self, child: &dyn Child) -> bool {
         self.contains_id(child.id())
     }
     fn contains_id(&self, id: &str) -> bool {
@@ -58,7 +62,6 @@ pub trait Element: Display + PrivElement {
     }
     //fn index_of(&self, child: &dyn Child) -> Option<usize>;
     fn child_count(&self) -> usize;
-    fn id(&self) -> &str;
     fn get_child(&self, id: &str) -> Option<&dyn Child> {
         for e in self.children() {
             if e.id() == id {
@@ -103,6 +106,7 @@ pub trait Child: Element + RemoveChild {
     fn parent_mut(&self) -> &mut dyn Element;
     fn set_width(&mut self, v: Unit);
     fn set_height(&mut self, v: Unit);
+    fn id(&self) -> &str;
     /*fn remove(&mut self) {
         match self.parent_mut().remove_child(self.id()) {
             Ok(()) => (),
@@ -111,7 +115,7 @@ pub trait Child: Element + RemoveChild {
     }*/
 }
 pub trait RemoveChild {
-    fn remove(self); // This returns self. I'm pretty sure this causes every compilation error on this page
+    fn remove(self);
 }
 
 impl<T> RemoveChild for T // This looks nice, and it doesn't cause any compilation errors, but there's no way it actually works
