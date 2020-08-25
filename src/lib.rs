@@ -5,10 +5,14 @@ macro_rules! export_children {
     };
 }
 
+pub use paste::paste;
+
 pub mod measurement;
 pub mod colors;
 pub mod elements;
+mod macros;
 mod element_traits; // Making this public would make elements::private public
+//mod symbol;
 
 export_children!(errors);
 
@@ -16,3 +20,4 @@ pub mod prelude {
     pub use crate::element_traits::{Element, Child, RemoveChild};
     pub use crate::elements::Document;
 }
+

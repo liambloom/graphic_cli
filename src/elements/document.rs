@@ -4,6 +4,7 @@ use std::{
     convert::TryInto,
     any::{Any, TypeId},
     ops::Drop,
+    fmt::{self, Display, Formatter}
 };
 use crossterm::{
     terminal::size,
@@ -11,14 +12,14 @@ use crossterm::{
     ExecutableCommand,
 };
 use crate::{
-    element_traits::*,
-    Error,
+    element_traits::{*},
+    ErrorKind,
 };
 
 static mut STDOUT_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
 //static mut STDERR_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
 
-fn enforce_once<T: 'static>() -> Result<()/*TypeId*/, Error> {
+fn enforce_once<T: 'static>() -> Result<()/*TypeId*/, ErrorKind> {
     let t = TypeId::of::<T>();
     let exists = unsafe { 
         if t == TypeId::of::<SeekStdout>() {
@@ -32,7 +33,7 @@ fn enforce_once<T: 'static>() -> Result<()/*TypeId*/, Error> {
         }
     };
     if &mut true == exists {
-        Err(Error::AlreadyExistsFor(t))
+        Err(ErrorKind::AlreadyExistsFor(t))
     }
     else {
         *exists = true;
@@ -40,9 +41,10 @@ fn enforce_once<T: 'static>() -> Result<()/*TypeId*/, Error> {
     }
 }
 
+#[derive(Debug)]
 pub struct Document<R, W>
-    where R: Read,
-          W: Write + Seek + Any
+    where R: Read + fmt::Debug,
+          W: Write + Seek + Any + fmt::Debug
 {
     read: R,
     write: W,
@@ -53,10 +55,10 @@ pub struct Document<R, W>
 }
 
 impl<R, W> Document<R, W>
-    where R: Read,
-          W: Write + Seek + Any
+    where R: Read + fmt::Debug,
+          W: Write + Seek + Any + fmt::Debug
 {
-    pub fn default() -> Result<Document<Stdin, SeekStdout>, Error> {
+    pub fn default() -> Result<Document<Stdin, SeekStdout>, ErrorKind> {
         enforce_once::<W>()?;
         let size = size()?;
         Ok(Document {
@@ -68,11 +70,22 @@ impl<R, W> Document<R, W>
             height: size.1,
         })
     }
+    pub fn new(config: DocumentConfig<R, W>) -> Result<Self, ErrorKind> {
+        enforce_once::<W>()?;
+        Ok(Self {
+            read: config.read,
+            write: config.write,
+            bmp: config.bmp, // This won't work
+            children: config.children,
+            width: config.width,
+            height: config.height,
+        })
+    }
 }
 
 impl<R, W> Drop for Document<R, W>
-    where R: Read,
-          W: Write + Seek + Any
+    where R: Read + fmt::Debug,
+          W: Write + Seek + Any + fmt::Debug
 {
     fn drop(&mut self) {
         if TypeId::of::<W>() == TypeId::of::<SeekStdout>() {
@@ -83,6 +96,35 @@ impl<R, W> Drop for Document<R, W>
     }
 }
 
+#[derive(Default)]
+pub struct DocumentConfig<R, W>
+    where R: Read + fmt::Debug,
+          W: Write + Seek + Any + fmt::Debug
+{
+    pub read: R,
+    pub write: W,
+    pub bmp: Vec<Vec<crate::colors::RGB>>,
+    pub children: Vec<Box<dyn Child>>,
+    pub width: u16, // (1) if self.write is io::Stdout, this should use crossterm::terminal::size() (or maybe crossterm::terminal::SetSize)
+    pub height: u16, // (2) if it's not io::Stdout,
+}
+
+impl Default for DocumentConfig<Stdin, SeekStdout>
+{
+    fn default() -> Self {
+        let size = size().unwrap();
+        Self {
+            read: io::stdin(),
+            write: SeekStdout::new(),
+            bmp: Vec::new(), // This won't work
+            children: Vec::new(),
+            width: size.0,
+            height: size.1,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct SeekStdout {
     stdout: Stdout,
 }
@@ -102,6 +144,12 @@ impl Write for SeekStdout {
         self.stdout.flush()
     }
 }
+/*impl Deref for SeekStdout {
+    type Target = Stdout;
+    fn deref(&self) -> &Self::Target {
+        &self.stdout
+    }
+}*/
 impl Seek for SeekStdout {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let size = unwrap_io(size())?;
@@ -140,18 +188,20 @@ fn move_to(stdout: &mut Stdout, to: u16, cols: u16) -> Result<u64, io::Error> {
     }
 }
 
-/*impl<R, W> Element for Document<R, W>
-    where R: io::Read,
-          W: io::Write
+impl<R, W> Element for Document<R, W>
+    where R: Read + fmt::Debug,
+          W: Write + Seek + Any + fmt::Debug
 {
-    fn id(&self) -> &str {
-        &self.id
+    fn doc(&self) -> &dyn Element {
+        self
     }
     fn children(&self) -> Vec<&dyn Child> {
-        self.children.iter().map(|&child| &*child).collect()
+        todo!();
+        //self.children.iter().map(|&child| &*child).collect()
     }
     fn children_mut(&mut self) -> Vec<&mut dyn Child> {
-        self.children.iter().map(|child| &mut **child).collect() // Is this allowed? Is box supposed to have interior mutability?
+        todo!();
+        //self.children.iter().map(|child| &mut **child).collect() // Is this allowed? Is box supposed to have interior mutability?
     }
     fn child_count(&self) -> usize {
         self.children.len()
@@ -164,10 +214,29 @@ fn move_to(stdout: &mut Stdout, to: u16, cols: u16) -> Result<u64, io::Error> {
     }
 }
 
-impl PrivElement for Document {
-
+impl<R, W> PrivElement for Document<R, W>
+    where R: Read + fmt::Debug,
+          W: Write + Seek + Any + fmt::Debug
+{
+    fn draw(&self) {
+        todo!();
+    }
+    fn children_owned(&mut self) -> &mut Vec<Box<dyn Child>> {
+        todo!();
+    }
+    fn width_exact(&self) -> f32 {
+        todo!();
+    }
+    fn height_exact(&self) -> f32 {
+        todo!();
+    }
 }
 
-impl Display for Document {
-
-}*/
+impl<R, W> Display for Document<R, W>
+    where R: Read + fmt::Debug,
+          W: Write + Seek + Any + fmt::Debug
+{
+    fn fmt<'a>(&self, _f: &mut Formatter<'a>) -> fmt::Result {
+        todo!()
+    }
+}
