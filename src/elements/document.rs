@@ -144,12 +144,6 @@ impl Write for SeekStdout {
         self.stdout.flush()
     }
 }
-/*impl Deref for SeekStdout {
-    type Target = Stdout;
-    fn deref(&self) -> &Self::Target {
-        &self.stdout
-    }
-}*/
 impl Seek for SeekStdout {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let size = unwrap_io(size())?;
@@ -192,7 +186,7 @@ impl<R, W> Element for Document<R, W>
     where R: Read + fmt::Debug,
           W: Write + Seek + Any + fmt::Debug
 {
-    fn doc(&self) -> &dyn Element {
+    fn doc(&self) -> &dyn Parent {
         self
     }
     fn children(&self) -> Vec<&dyn Child> {
@@ -203,9 +197,6 @@ impl<R, W> Element for Document<R, W>
         todo!();
         //self.children.iter().map(|child| &mut **child).collect() // Is this allowed? Is box supposed to have interior mutability?
     }
-    fn child_count(&self) -> usize {
-        self.children.len()
-    }
     fn get_width(&self) -> u16 {
         self.width
     }
@@ -213,6 +204,10 @@ impl<R, W> Element for Document<R, W>
         self.height
     }
 }
+
+impl<R, W> Parent for Document<R, W>
+    where R: Read + fmt::Debug,
+          W: Write + Seek + Any + fmt::Debug {}
 
 impl<R, W> PrivElement for Document<R, W>
     where R: Read + fmt::Debug,

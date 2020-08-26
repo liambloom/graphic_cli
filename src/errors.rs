@@ -5,6 +5,7 @@
 pub enum ErrorKind {
     ChildNotFound(String),
     IdAlreadyExists(String),
+    NoChildrenAllowed,
     AlreadyExistsFor(std::any::TypeId),
     CrosstermError(crossterm::ErrorKind),
 }

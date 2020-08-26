@@ -36,10 +36,10 @@ fn main() -> () {
     }*/
     /*let y: *mut Element = &mut Document::default().unwrap();
     let x: Box<dyn Element> = unsafe { Box::from_raw(Document::default().unwrap() *mut Element) };*/
-    println!("{:?}", Markup!(
-        <document read=(stdin()) write=(SeekStdout::new())> {
+    println!("{:?}", markup!(
+        {<document read=(stdin()) write=(SeekStdout::new())> {
             {<unimplementedChild/>}
-        } </document>
+        } </document>}
     ).unwrap());
     //SGML!(<document/>);
     

@@ -29,7 +29,7 @@ impl Child for UnimplementedChild {
     }
 }
 impl Element for UnimplementedChild {
-    fn doc(&self) -> &dyn Element {
+    fn doc(&self) -> &dyn Parent {
         unimplemented!()
     }
     fn children(&self) -> Vec<&dyn Child> {
@@ -44,10 +44,8 @@ impl Element for UnimplementedChild {
     fn get_height(&self) -> u16 {
         unimplemented!()
     }
-    fn child_count(&self) -> usize {
-        unimplemented!()
-    }
 }
+impl OptionParent for UnimplementedChild {}
 impl PrivElement for UnimplementedChild {
     fn draw(&self) {
         unimplemented!()

@@ -17,7 +17,7 @@ mod element_traits; // Making this public would make elements::private public
 export_children!(errors);
 
 pub mod prelude {
-    pub use crate::element_traits::{Element, Child, RemoveChild};
+    pub use crate::element_traits::*;
     pub use crate::elements::Document;
 }
 
