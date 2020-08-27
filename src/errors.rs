@@ -15,3 +15,5 @@ impl From<crossterm::ErrorKind> for ErrorKind {
         Self::CrosstermError(error) // This does contain other errors
     }
 }
+
+pub type Result<T> = std::result::Result<T, ErrorKind>;

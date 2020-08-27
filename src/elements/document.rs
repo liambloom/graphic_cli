@@ -13,13 +13,14 @@ use crossterm::{
 };
 use crate::{
     element_traits::{*},
-    ErrorKind,
+    errors::{ErrorKind, Result as CustomResult},
+    measurement::Unit,
 };
 
 static mut STDOUT_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
 //static mut STDERR_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
 
-fn enforce_once<T: 'static>() -> Result<()/*TypeId*/, ErrorKind> {
+fn enforce_once<T: 'static>() -> CustomResult<()/*TypeId*/> {
     let t = TypeId::of::<T>();
     let exists = unsafe { 
         if t == TypeId::of::<SeekStdout>() {
@@ -58,7 +59,7 @@ impl<R, W> Document<R, W>
     where R: Read + fmt::Debug,
           W: Write + Seek + Any + fmt::Debug
 {
-    pub fn default() -> Result<Document<Stdin, SeekStdout>, ErrorKind> {
+    pub fn default() -> CustomResult<Document<Stdin, SeekStdout>> {
         enforce_once::<W>()?;
         let size = size()?;
         Ok(Document {
@@ -70,7 +71,7 @@ impl<R, W> Document<R, W>
             height: size.1,
         })
     }
-    pub fn new(config: DocumentConfig<R, W>) -> Result<Self, ErrorKind> {
+    pub fn new(config: DocumentConfig<R, W>) -> CustomResult<Self> {
         enforce_once::<W>()?;
         Ok(Self {
             read: config.read,
@@ -95,6 +96,8 @@ impl<R, W> Drop for Document<R, W>
         }
     }
 }
+
+pub type StdDocument = Document<Stdin, SeekStdout>;
 
 #[derive(Default)]
 pub struct DocumentConfig<R, W>
@@ -123,6 +126,8 @@ impl Default for DocumentConfig<Stdin, SeekStdout>
         }
     }
 }
+
+pub type StdDocumentConfig = DocumentConfig<Stdin, SeekStdout>;
 
 #[derive(Debug)]
 pub struct SeekStdout {
@@ -202,6 +207,12 @@ impl<R, W> Element for Document<R, W>
     }
     fn get_height(&self) -> u16 {
         self.height
+    }
+    fn set_width(&mut self, _width: Unit) -> CustomResult<()> {
+        todo!();
+    }
+    fn set_height(&mut self, _height: Unit) -> CustomResult<()> {
+        todo!();
     }
 }
 

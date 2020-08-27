@@ -4,7 +4,9 @@ use graphic_cli::elements::*;
 use graphic_cli::*;
 use graphic_cli::prelude::*;
 use std::io::*;
-use paste::paste;
+//use paste::paste;
+use graphic_cli::markup;
+use graphic_cli::paste;
 
 /*/*macro_rules! SGML {
     (<$tag_name:ident $($attr_name:ident=($attr_value:expr))*/>) => {
@@ -37,14 +39,21 @@ fn main() -> () {
     /*let y: *mut Element = &mut Document::default().unwrap();
     let x: Box<dyn Element> = unsafe { Box::from_raw(Document::default().unwrap() *mut Element) };*/
     println!("{:?}", markup!(
-        {<document read=(stdin()) write=(SeekStdout::new())> {
+        <stdDocument> {
             {<unimplementedChild/>}
-        } </document>}
+        } </stdDocument>
+        /*crate::elements::Document::<std::io::Stdin, crate::elements::SeekStdout>::new(
+            DocumentConfig {
+                
+                children: vec![],
+                ..DocumentConfig::default()
+            }
+        )*/
     ).unwrap());
     //SGML!(<document/>);
     
 }
 
-fn bar<T: Read>(x: T) {
+/*fn bar<T: Read>(x: T) {
 
-}
+}*/
