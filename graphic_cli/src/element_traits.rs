@@ -3,6 +3,7 @@ use std::{
     cell::{Ref, RefMut, RefCell},
     any::TypeId,
     sync::atomic::AtomicUsize,
+    ops::Deref,
 };
 use crate::{
     elements::*,
@@ -80,43 +81,17 @@ impl dyn Parent {
         }
     }
 
-    fn ref_mut_as_parent<'a>(el_ref: RefMut<'a, dyn Element>) -> Option<RefMut<'a, dyn Parent>> {
-        if el_ref.is_parent() {
-            Some(RefMut::map(el_ref, |orig| orig.as_parent_mut().unwrap()))
-        }
-        else {
-            None
-        }
-    }
-
-    pub fn get_child<'a, T: Child>(&'a self, id: usize) -> Option<Ref<'a, T>> {
+    pub fn get_child(&self, id: usize) -> Option<Rc<RefCell<dyn Child>>> {
         for child in self.children().iter() {
-            let child = (&**child).borrow();
-            match Element::downcast_ref::<T>(Ref::map(child, |child| child.as_element())) {
-                Ok(child) => return Some(child),
-                Err(child) => {
-                    if let Some(child) = Parent::ref_as_parent(child) {
-                        if let Some(sub_child) = child.get_child::<T>(id) {
-                            return Some(sub_child);
-                        }
-                    }
-                }
+            let child_ref = child.borrow();
+            if child_ref.id() == id {
+                return Some(Rc::clone(child))
             }
-        }
-        None
-    }
-
-    // I don't *need* to make this &mut self, but should I?
-    pub fn get_child_mut<T: Element + 'static>(&self, id: usize) -> Option<RefMut<'_, T>> {
-        for child in self.children().iter() {
-            let child = (&**child).borrow_mut();
-            match Element::downcast_mut::<T>(RefMut::map(child, |child| child.as_element_mut())) {
-                Ok(child) => return Some(child),
-                Err(child) => {
-                    if let Some(child) = Parent::ref_mut_as_parent(child) {
-                        if let Some(sub_child) = child.get_child_mut::<T>(id) {
-                            return Some(sub_child);
-                        }
+            else {
+                if let Some(child) = Parent::ref_as_parent(Ref::map(child_ref, |child| child.as_element())) {
+                    let sub_child = child.get_child(id);
+                    if sub_child.is_some() {
+                        return sub_child;
                     }
                 }
             }
