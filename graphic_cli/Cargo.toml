@@ -3,10 +3,13 @@ name = "graphic_cli"
 version = "0.1.0"
 authors = ["liambloom <liamrbloom@gmail.com>"]
 edition = "2018"
+license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-crossterm = "0.17.7"
-paste = "1.0"
+as_any_min = "1.0"
+graphic_cli_derive = { path = "../graphic_cli_derive" }
+# crossterm = "0.17.7"
+# paste = "1.0"
 # lazy_static = "1.4.0"

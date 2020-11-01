@@ -1,0 +1,15 @@
+[package]
+name = "graphic_cli_derive"
+version = "0.1.0"
+authors = ["liambloom <liamrbloom@gmail.com>"]
+edition = "2018"
+license = "Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# Syn parses rust code, because building a rust parser is hard
+syn = "1.0"
+# quote turns the output of syn back into rust code
+quote = "1.0"
