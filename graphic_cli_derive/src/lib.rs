@@ -25,6 +25,13 @@ fn impl_parent(ast: &syn::DeriveInput) -> TokenStream {
                 Some(self)
             }
         }
+        impl Drop for #name {
+            fn drop(&mut self) {
+                if !self.as_parent().unwrap().safe_to_drop() {
+                    panic!("Cannot drop parent element {}#{}, one of its children still has multiple strong references", stringify!(#name), self.id())
+                }
+            }
+        }
     };
     gen.into()
 }
