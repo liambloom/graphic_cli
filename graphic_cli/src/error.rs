@@ -2,7 +2,9 @@ use std::any::TypeId;
 
 #[derive(Debug)]
 pub enum ErrorKind {
-    IncorrectType(TypeId),
+    AlreadyExists(TypeId),
+    DefaultIONotTTY,
+    //IncorrectType(TypeId),
     /*ChildNotFound(String),
     IdAlreadyExists(String),
     NoChildrenAllowed,

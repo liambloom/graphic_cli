@@ -1,10 +1,10 @@
 use std::{
     rc::Rc,
-    cell::RefCell,
-    sync::atomic::AtomicUsize,
+    cell::{RefCell/*, Ref, RefMut*/},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 use crate::{
-    elements::*,
+    // elements::*,
     casters::*,
 };
 
@@ -14,6 +14,10 @@ pub trait Element: AsElement + AsParent + AsChild + AsAny + 'static {
 
 impl dyn Element {
     const ELEMENT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn get_id() -> usize {
+        Element::ELEMENT_COUNT.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 pub trait Parent: Element {
@@ -55,6 +59,19 @@ impl dyn Parent {
 }
 
 pub trait Child: Element {
-    fn doc(&self) -> Rc<Doc>;
-    fn parent(&self) -> Rc<dyn Parent>;
+    /*fn doc(&self) -> Ref<dyn Parent> {
+        (*self.doc_rc()).borrow()
+    }
+    fn doc_mut(&self) -> RefMut<dyn Parent> {
+        self.doc_rc().borrow_mut()
+    }*/
+    fn doc_rc(&self) -> Rc<RefCell<dyn Parent>>;
+
+    /*fn parent(&self) -> Ref<dyn Parent> {
+        self.parent_rc().borrow()
+    }
+    fn parent_mut(&self) -> RefMut<dyn Parent> {
+        self.parent_rc().borrow_mut()
+    }*/
+    fn parent_rc(&self) -> Rc<RefCell<dyn Parent>>;
 }
