@@ -5,11 +5,14 @@ authors = ["liambloom <liamrbloom@gmail.com>"]
 edition = "2018"
 license = "Apache-2.0 OR MIT"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = []
+tty = ["crossterm"]
+# Add xml parser at some point
 
 [dependencies]
 as_any_min = "1.0"
 graphic_cli_derive = { path = "../graphic_cli_derive" }
-crossterm = "0.18" # I've been working on this so long crossterm has had breaking updates
+crossterm = { version = "0.18", optional = true } # I've been working on this so long crossterm has had breaking updates
 # paste = "1.0"
 # lazy_static = "1.4.0"
