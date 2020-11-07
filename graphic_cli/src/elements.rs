@@ -20,7 +20,7 @@ else set doc to Rc::clone(parent).downgrade()
 #[cfg(feature = "tty")]
 reexport!(tty_doc);
 
-#[derive(NotParent, Child)]
+#[derive(Debug, NotParent, Child)]
 pub struct TestChild {
     doc: Weak<RefCell<dyn Parent>>,
     parent: Weak<RefCell<dyn Parent>>,

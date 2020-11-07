@@ -8,15 +8,16 @@ use crate::{
     casters::*,
 };
 
-pub trait Element: AsElement + AsParent + AsChild + AsAny + 'static {
+static ELEMENT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+pub trait Element: AsElement + AsParent + AsChild + AsAny + std::fmt::Debug + 'static {
     fn id(&self) -> usize;
 }
 
 impl dyn Element {
-    const ELEMENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     pub fn get_id() -> usize {
-        Element::ELEMENT_COUNT.fetch_add(1, Ordering::Relaxed)
+        ELEMENT_COUNT.fetch_add(1, Ordering::Relaxed)
     }
 }
 

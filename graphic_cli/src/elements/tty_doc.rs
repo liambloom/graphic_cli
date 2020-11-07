@@ -4,9 +4,9 @@
 use std::{
     rc::Rc,
     cell::RefCell,
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, Ordering},
     io::{Read, Write, stdin, stdout},
-    any::TypeId,
+    any::type_name,
 };
 use crate::{
     traits::*,
@@ -18,8 +18,9 @@ use crossterm::{
     tty::IsTty,
 };
 
+static TTY_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
 
-#[derive(Parent, NotChild)]
+#[derive(Debug, Parent, NotChild)]
 pub struct TTYDoc {
     children: Vec<Rc<RefCell<dyn Child>>>,
     id: usize,
@@ -27,27 +28,27 @@ pub struct TTYDoc {
 }
 
 impl TTYDoc {
-    const EXISTS: AtomicBool = AtomicBool::new(false);
-
     pub fn new() -> Result<Rc<RefCell<Self>>> {
-        let stdin = stdin();
-        let stdout = stdout();
-        if !stdin.is_tty() || !stdout.is_tty() {
-            Err(ErrorKind::DefaultIONotTTY)
-        }
-        else {
-            Self::new_using(stdin, stdout)
-        }
+        Self::new_using(stdin(), stdout())
     }
 
     pub fn new_using<R, W>(input: R, output: W) -> Result<Rc<RefCell<Self>>>
-        where R: Read + IsTty,
-              W: Write + IsTty
+        where R: Read + IsTty + 'static,
+              W: Write + IsTty + 'static
     {
-        if *Self::EXISTS.get_mut() {
-            return Err(ErrorKind::AlreadyExists(TypeId::of::<Self>()));
+        if TTY_DOC_EXISTS.compare_and_swap(false, true, Ordering::AcqRel) {
+            return Err(ErrorKind::AlreadyExists(type_name::<Self>()));
         }
-        todo!();
+
+        if !input.is_tty() || !output.is_tty() {
+            return Err(ErrorKind::NotATTY);
+        }
+        
+        Ok(Rc::new(RefCell::new(Self {
+            children: Vec::new(),
+            id: Element::get_id(),
+            _ondrop: TTYDocOnDrop,
+        })))
     }
 }
 
@@ -63,10 +64,11 @@ impl Parent for TTYDoc {
     }
 }
 
+#[derive(Clone, Debug)]
 struct TTYDocOnDrop;
 
 impl Drop for TTYDocOnDrop {
     fn drop(&mut self) {
-        *TTYDoc::EXISTS.get_mut() = true;
+        assert!(TTY_DOC_EXISTS.compare_and_swap(true, false, Ordering::AcqRel));
     }
 }
