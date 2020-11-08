@@ -13,8 +13,9 @@ pub fn parent_derive(input: TokenStream) -> TokenStream {
 
 fn impl_parent(ast: &syn::DeriveInput) -> TokenStream {
     let name = &ast.ident;
+    let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
     let gen = quote! {
-        impl AsParent for #name {
+        impl #impl_generics AsParent for #name #ty_generics #where_clause {
             fn is_parent(&self) -> bool {
                 true
             }
@@ -25,7 +26,7 @@ fn impl_parent(ast: &syn::DeriveInput) -> TokenStream {
                 Some(self)
             }
         }
-        impl Drop for #name {
+        impl #impl_generics Drop for #name #ty_generics #where_clause {
             fn drop(&mut self) {
                 if !self.as_parent().unwrap().safe_to_drop() {
                     panic!("Cannot drop parent element {}#{}, one of its children still has multiple strong references", stringify!(#name), self.id())
@@ -47,8 +48,9 @@ pub fn not_parent_derive(input: TokenStream) -> TokenStream {
 
 fn impl_not_parent(ast: &syn::DeriveInput) -> TokenStream {
     let name = &ast.ident;
+    let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
     let gen = quote! {
-        impl AsParent for #name {
+        impl #impl_generics AsParent for #name #ty_generics #where_clause {
             fn is_parent(&self) -> bool {
                 false
             }
@@ -74,8 +76,9 @@ pub fn child_derive(input: TokenStream) -> TokenStream {
 
 fn impl_child(ast: &syn::DeriveInput) -> TokenStream {
     let name = &ast.ident;
+    let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
     let gen = quote! {
-        impl AsChild for #name {
+        impl #impl_generics AsChild for #name #ty_generics #where_clause {
             fn is_child(&self) -> bool {
                 true
             }
@@ -101,8 +104,9 @@ pub fn not_child_derive(input: TokenStream) -> TokenStream {
 
 fn impl_not_child(ast: &syn::DeriveInput) -> TokenStream {
     let name = &ast.ident;
+    let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
     let gen = quote! {
-        impl AsChild for #name {
+        impl #impl_generics AsChild for #name #ty_generics #where_clause {
             fn is_child(&self) -> bool {
                 false
             }

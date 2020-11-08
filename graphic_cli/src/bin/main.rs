@@ -1,15 +1,16 @@
 // Main is only used for testing (for now), so this is fine
 #![allow(unused_imports, dead_code, unused_variables)]
 
-use std::sync::atomic::AtomicBool;
+use std::io::stdout;
+use crossterm::{*, style::*};
+use graphic_cli::elements::*;
 
 fn main() {
-    /*static mut foo: AtomicBool = AtomicBool::new(false);
-    //const bar: AtomicBool = foo;
-    *foo.get_mut() = true;
-    println!("{}", foo.get_mut());
-    //let foo_borrow = foo.get_mut();
-    //let bar_borrow = bar.get_mut();
-    //*foo_borrow = true;
-    */*/
+    TTYDoc::new().unwrap().borrow_mut().draw();
+    
+    /*let mut stdout = stdout();
+    stdout
+        .execute(PrintStyledContent(style('f'))).unwrap()
+        .execute(PrintStyledContent(style('o'))).unwrap()
+        .execute(PrintStyledContent(style('o'))).unwrap();*/
 }
