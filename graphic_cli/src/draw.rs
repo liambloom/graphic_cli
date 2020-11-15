@@ -1,16 +1,24 @@
 use std::convert::Into;
 use crossterm::style::{Color, StyledContent, style};
+use crate::measurement::Unit;
 
 #[derive(Debug, Clone)]
 pub struct Canvas {
-    pub a: Vec<Vec<StyledContent<char>>>,
+    pub a: Vec<Color>,
+    el: Weak<RefCell<dyn Element>>,
 }
 
 impl Canvas {
-    pub fn new(rows: usize, cols: usize) -> Self {
+    pub fn new(rows: Unit, cols: Unit) -> Self {
         Self {
-            a: vec![vec![style(' ').on(Color::White); cols]; rows],
+            a: vec![Color::White; cols * rows],
         }
+    }
+}
+
+impl Into<Vec<StyledContent<char>>> for &Canvas {
+    fn into(self) -> Vec<StyledContent<char>> {
+
     }
 }
 

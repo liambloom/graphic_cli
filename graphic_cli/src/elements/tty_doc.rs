@@ -4,7 +4,7 @@
 use std::{
     rc::Rc,
     cell::RefCell,
-    sync::{self, atomic::{AtomicBool, Ordering}},
+    sync::atomic::{AtomicBool, Ordering},
     io::{Read, Write, stdin, stdout, Stdin, Stdout},
     any::type_name,
     fmt,
@@ -26,7 +26,6 @@ use crossterm::{
 };
 
 static TTY_DOC_EXISTS: AtomicBool = AtomicBool::new(false);
-// static mut TTY_DOC: sync::Weak<Box<dyn Parent>> = sync::Weak::new();
 
 #[derive(Debug, NotChild)]
 pub struct TTYDoc<R, W>
@@ -72,13 +71,13 @@ impl<R, W> TTYDoc<R, W>
 
     pub fn draw(&mut self) -> Result<()> {
         self.output.queue(cursor::MoveTo(0, 0))?;
-        for row in self.canvas.a.iter() {
-            self.output
-                .queue(cursor::MoveDown(1))?
-                .queue(cursor::MoveToColumn(0))?;
-            for cell in row {
-                self.output.queue(style::PrintStyledContent(*cell))?;
+        let canvas = &self.canvas.a;
+        for row in 0..self.rows {
+            self.output.queue(cursor::MoveToColumn(0))?;
+            for col in 0..self.cols {
+                self.output.queue(style::PrintStyledContent(canvas[(row * self.cols + col) as usize]))?;
             }
+            self.output.queue(cursor::MoveDown(1))?;
         }
         self.output.flush()?;
         Ok(())
@@ -99,17 +98,20 @@ impl<R, W> AsParent for TTYDoc<R, W>
         Some(self)
     }
 }
+
 impl<R, W> Drop for TTYDoc<R, W>
     where R: Read + IsTty + fmt::Debug + 'static,
-        W: Write + IsTty + fmt::Debug + 'static  
+          W: Write + IsTty + fmt::Debug + 'static  
 {
     fn drop(&mut self) {
         if !self.as_parent().unwrap().safe_to_drop() {
             panic!("Cannot drop parent element {}#{}, one of its children still has multiple strong references", stringify!(#name), self.id());
         }
         
-        assert!(TTY_DOC_EXISTS.compare_and_swap(true, false, Ordering::AcqRel));
-        self.output.execute(cursor::Show).expect("Failed to re-show cursor");
+        debug_assert!(TTY_DOC_EXISTS.compare_and_swap(true, false, Ordering::AcqRel));
+        self.output.queue(cursor::Show).expect("Failed to re-show cursor");
+        self.output.queue(style::ResetColor).expect("Failed to reset terminal colors");
+        self.output.flush().expect("Error flushing output buffer");
     }
 }
 
