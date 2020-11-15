@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, ops};
 use Unit::*;
 
 /// This is used for measurement
@@ -63,6 +63,38 @@ impl fmt::Display for Unit {
             Min(a, b) => write!(f, "min({}, {})", a, b),
             Max(a, b) => write!(f, "max({}, {})", a, b),
         }
+    }
+}
+
+impl ops::Add<Unit> for Unit {
+    type Output = Unit;
+
+    fn add(self, o: Unit) -> Unit {
+        Unit::Add(Box::new(self), Box::new(o))
+    }
+}
+
+impl ops::Sub<Unit> for Unit {
+    type Output = Unit;
+
+    fn sub(self, o: Unit) -> Unit {
+        Unit::Sub(Box::new(self), Box::new(o))
+    }
+}
+
+impl ops::Mul<f32> for Unit {
+    type Output = Unit;
+
+    fn mul(self, o: f32) -> Unit {
+        Unit::Mul(Box::new(self), o)
+    }
+}
+
+impl ops::Div<f32> for Unit {
+    type Output = Unit;
+
+    fn div(self, o: f32) -> Unit {
+        Unit::Div(Box::new(self), o)
     }
 }
 
