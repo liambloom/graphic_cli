@@ -1,10 +1,16 @@
 use std::{
-    sync::{Arc, RwLock, Once, TryLockError, PoisonError, RwLockWriteGuard as WLock, atomic::{AtomicBool, Ordering}},
+    sync::atomic::AtomicUsize, 
+    convert::From, 
+    error::Error, 
+    fmt, 
     io::{self, stdin, stdout, stderr, Write},
-    convert::From,
-    ops::Deref,
-    error::Error,
-    fmt,
+    ops::Deref, 
+    sync::{
+        PoisonError, TryLockError, 
+        atomic::{AtomicBool, Ordering}, 
+    },
+    rc::Rc,
+    cell::{RefCell, BorrowError},
 };
 use crossterm::{
     QueueableCommand, ExecutableCommand,
@@ -12,132 +18,58 @@ use crossterm::{
     style::{ContentStyle, StyledContent, PrintStyledContent},
     terminal, cursor,
 };
-use lazy_static::lazy_static;
 
-type Av<T> = Arc<RwLock<Vec<T>>>;
+static CANVAS_ONCE: AtomicBool = AtomicBool::new(true);
 
-static AUTO_UPDATE: AtomicBool = AtomicBool::new(true);
-
-#[derive(Copy, Clone, Debug)]
-enum TTYWrite {
-    Out,
-    Err,
-}
-
-impl TTYWrite {
-    pub fn get_write(&self) -> Box<dyn Write> {
-        match self {
-            TTYWrite::Out => Box::new(stdout()),
-            TTYWrite::Err => Box::new(stderr())
-        }
-    }
-}
-
-lazy_static! {
-    static ref WRITE_CONSTRUCTOR: TTYWrite = {
-        if stdout().is_tty() {
-            TTYWrite::Out
-        }
-        else if stderr().is_tty() {
-           TTYWrite::Err
-        }
-        else {
-            panic!("Neither stdout nor stderr are ttys");
-        }
-    };
-}
-
-fn ttyout() -> Box<dyn Write> {
-    WRITE_CONSTRUCTOR.get_write()
-}
-
-struct CursorHider;
-
-impl Drop for CursorHider {
-    #[allow(unused_must_use)]
-    fn drop(&mut self) {
-        ttyout().execute(cursor::Hide);
-    }
-}
-
-lazy_static! {
-    static ref LAYERS: Av<Layer> = Arc::new(RwLock::new(Vec::new()));
-    static ref CHANGED: Av<bool> = Arc::new(RwLock::new(vec![true; Layer::size()]));
-}
-
-pub fn canvas() -> Canvas {
-    static ONCE: Once = Once::new();
-    static _CURSOR_HIDER: CursorHider = CursorHider;
-
-    #[allow(unused_must_use)]
-    ONCE.call_once(|| {
-        ttyout().execute(cursor::Show);
-
-        if !stdin().is_tty() {
-            panic!("Stdin is not tty");
-        }
-
-        ttyout();
-
-        Canvas {
-            layers: Arc::clone(&LAYERS),
-            changed: Arc::clone(&CHANGED),
-        }.draw();
-    });
-
-    Canvas {
-        layers: Arc::clone(&LAYERS),
-        changed: Arc::clone(&CHANGED),
-    }
-}
-
+#[derive(Clone, Debug)]
 pub struct Canvas {
-    pub layers: Av<Layer>,
-    changed: Av<bool>,
+    pub layers: Vec<Layer>,
+    changed: Rc<RefCell<Vec<bool>>>,
 }
 
 impl Canvas {
-
-    pub fn add_layer(&mut self) -> Result<()> {
-        let mut layers = self.layers.write()?;
-        layers.push(self.new_layer());
-        Ok(())
+    pub fn new() -> Self {
+        let mut out = stdout();
+        CANVAS_COUNT.fetch_add(1, Ordering::Release);
+        if CANVAS_ONCE.compare_and_swap(true, false, Ordering::AcqRel) {
+            if !out.is_tty() {
+                eprintln!("Stdout is not a terminal");
+            }
+        }
+        out.execute(cursor::Hide).expect("Failed to hide the cursor");
+        Self {
+            layers: Vec::new(),
+            changed: Rc::new(RefCell::new(Vec::new())),
+        }
     }
 
-    pub fn try_add_layer(&mut self) -> Result<()> {
-        let mut layers = self.layers.try_write()?;
-        layers.push(self.new_layer());
-        Ok(())
+    pub fn add_layer(&mut self) {
+        self.layers.push(self.new_layer());
     }
 
     fn new_layer(&self) -> Layer {
         Layer {
             buf: vec![StyledContent::new(ContentStyle::new(), ' '); Layer::size()],
+            changed: Rc::clone(&self.changed),
         }
     }
 
-    pub fn draw(&self) -> Result<()> {
-        self.draw_inner(
-            self.changed.write()?,
-            self.layers.write()?
-        )
+    pub fn update(&self) -> Result<()> {
+        self.update_inner(self.changed.borrow())
     }
 
-    pub fn try_draw(&self) -> Result<()> {
-        self.draw_inner(
-            self.changed.try_write()?,
-            self.layers.try_write()?
-        )
+    pub fn try_update(&self) -> Result<()> {
+        self.update_inner(self.changed.try_borrow()?)
     }
 
-    fn draw_inner(&self, changed: WLock<Vec<bool>>, layers: WLock<Vec<Layer>>) -> Result<()> {
+    fn update_inner(&self, changed: impl Deref<Target = Vec<bool>>) -> Result<()> {
         let cols = terminal::size().expect("Unable to get terminal size").0;
-        let mut out = ttyout();
+        let mut out = stdout();
         for (i, e) in changed.iter().enumerate() {
             if *e {
                 out
                     .queue(cursor::MoveTo((i % cols as usize) as u16, (i / cols as usize) as u16))?
-                    .queue(PrintStyledContent(char_at(&layers, i)))?;
+                    .queue(PrintStyledContent(char_at(&self.layers, i)))?;
             }
         }
         out.flush()?;
@@ -145,8 +77,21 @@ impl Canvas {
     }
 }
 
+static CANVAS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+impl Drop for Canvas {
+    fn drop(&mut self) {
+        if CANVAS_COUNT.fetch_sub(1, Ordering::AcqRel) == 1 {
+            stdout().execute(cursor::Show).expect("Failed to un-hide the cursor");
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Layer {
     buf: Vec<StyledContent<char>>,
+    changed: Rc<RefCell<Vec<bool>>>,
+    //sender: Sender<Message>
 }
 
 impl Layer {
@@ -154,13 +99,32 @@ impl Layer {
         let (cols, rows) = terminal::size().expect("Unable to get terminal size");
         rows as usize * cols as usize
     }
+
+    #[cfg(windows)]
+    fn resolution() -> (u16, u16) {
+        let (cols, rows) = terminal::size().expect("Unable to get terminal size");
+        (cols, rows * 2)
+    }
+
+    #[cfg(unix)]
+    fn resolution() -> (u16, u16) {
+        // https://hermanradtke.com/2015/01/12/terminal-window-size-with-rust-ffi.html
+        // The above link is a blogpost on how to get the terminal size with rust FII.
+        use libc::{c_int, c_ulong, c_ushort, winsize, STDOUT_FILENO};
+        use libc::funcs::bsd44::ioctl;
+        
+    }
+
+    fn fillRect(&self) {
+        
+    }
 }
 
 
-fn char_at<T: Deref<Target = Vec<Layer>>>(buf: &T, i: usize) -> StyledContent<char> {
+fn char_at(buf: &Vec<Layer>, i: usize) -> StyledContent<char> {
     let mut c = StyledContent::new(ContentStyle::new(), ' ');
-    for j in (0..buf.len()).rev() {
-        c = overlay(&c, &buf[j].buf[i]);
+    for layer in buf.iter().rev() {
+        c = overlay(&c, &layer.buf[i]);
         if overlay_possible(c.content()) {
             break;
         }
@@ -176,12 +140,14 @@ fn overlay_possible(_c: &char) -> bool {
     false
 }
 
+
 #[derive(Debug)]
 pub enum ErrorKind {
     PoisonError,
     WouldBlock,
     CrosstermError(crossterm::ErrorKind),
     IOError(io::Error),
+    BorrowError,
 }
 
 impl Error for ErrorKind {}
@@ -191,10 +157,11 @@ impl fmt::Display for ErrorKind {
         use ErrorKind::*;
 
         match self {
-            PoisonError => write!(f, "Poison"),
-            WouldBlock => write!(f, "WouldBlock"),
+            PoisonError => write!(f, "poisoned lock: another task failed inside"),
+            WouldBlock => write!(f, "try_lock failed because the operation would block"),
             CrosstermError(err) => write!(f, "{}", err),
             IOError(err) => write!(f, "{}", err),
+            BorrowError => write!(f, "already mutably borrowed")
         }
     }
 }
@@ -227,5 +194,11 @@ impl<T> From<PoisonError<T>> for ErrorKind {
 impl From<io::Error> for ErrorKind {
     fn from(err: io::Error) -> ErrorKind {
         ErrorKind::IOError(err)
+    }
+}
+
+impl From<BorrowError> for ErrorKind {
+    fn from(_: BorrowError) -> ErrorKind {
+        ErrorKind::BorrowError
     }
 }
