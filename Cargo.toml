@@ -3,7 +3,7 @@ name = "graphic_cli"
 version = "0.1.0"
 authors = ["liambloom <liamrbloom@gmail.com>"]
 edition = "2018"
-license = "Apache-2.0 OR MIT"
+license = "Apache-2.0"
 
 # [features]
 # default = []
