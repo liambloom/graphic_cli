@@ -1,9 +1,12 @@
+// Copyright 2020 Liam Bloom
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{
     sync::atomic::AtomicUsize, 
     convert::From, 
     error::Error, 
     fmt, 
-    io::{self, stdin, stdout, stderr, Write},
+    io::{self, stdout, Write},
     ops::Deref, 
     sync::{
         PoisonError, TryLockError, 
@@ -15,9 +18,12 @@ use std::{
 use crossterm::{
     QueueableCommand, ExecutableCommand,
     tty::IsTty,
-    style::{ContentStyle, StyledContent, PrintStyledContent},
+    style::{ContentStyle, StyledContent, PrintStyledContent, style},
     terminal, cursor,
 };
+pub use crossterm::style::Color;
+#[cfg(unix)]
+use libc::{winsize, ioctl, STDOUT_FILENO, TIOCGWINSZ};
 
 static CANVAS_ONCE: AtomicBool = AtomicBool::new(true);
 
@@ -39,7 +45,7 @@ impl Canvas {
         out.execute(cursor::Hide).expect("Failed to hide the cursor");
         Self {
             layers: Vec::new(),
-            changed: Rc::new(RefCell::new(Vec::new())),
+            changed: Rc::new(RefCell::new(vec![true; Layer::size()])),
         }
     }
 
@@ -89,7 +95,7 @@ impl Drop for Canvas {
 
 #[derive(Clone, Debug)]
 pub struct Layer {
-    buf: Vec<StyledContent<char>>,
+    pub buf: Vec<StyledContent<char>>,
     changed: Rc<RefCell<Vec<bool>>>,
     //sender: Sender<Message>
 }
@@ -101,21 +107,80 @@ impl Layer {
     }
 
     #[cfg(windows)]
-    fn resolution() -> (u16, u16) {
+    pub fn resolution() -> (u16, u16) {
         let (cols, rows) = terminal::size().expect("Unable to get terminal size");
         (cols, rows * 2)
     }
 
+    
     #[cfg(unix)]
-    fn resolution() -> (u16, u16) {
-        // https://hermanradtke.com/2015/01/12/terminal-window-size-with-rust-ffi.html
-        // The above link is a blogpost on how to get the terminal size with rust FII.
-        use libc::{c_int, c_ulong, c_ushort, winsize, STDOUT_FILENO};
-        use libc::funcs::bsd44::ioctl;
-        
+    pub fn resolution() -> (u16, u16) {
+        let w = get_winsize();
+
     }
 
-    fn fillRect(&self) {
+    pub fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
+        for i in y..(y+height) {
+            for j in x..(x+width) {
+                self.set_px(i, j, color);
+            }
+        }
+    }
+
+    fn px_size() -> (f32, f32) {
+        let r = Layer::resolution();
+        let (cols, rows) = terminal::size().expect("Unable to get terminal size");
+        let ar = (r.0 as f64 / cols as f64) / (r.1 as f64 / rows as f64);
+        if ar < 0.75 {
+            (1.0, 0.5)
+        }
+        else if ar > 1.333 {
+            (0.5, 1.0)
+        }
+        else {
+            (1.0, 1.0)
+        }
+    }
+
+    fn coords_to_index(x: u16, y: u16) -> usize {
+        let r = Layer::resolution();
+        if x > r.0 || y > r.1 {
+            panic!("Cannot draw outside of bounds");
+        }
+        let (px_width, px_height) = Layer::px_size();
+        let x = x as f32 * px_width;
+        let y = y as f32 * px_height;
+        y as usize * terminal::size().expect("Unable to get terminal size").0 as usize + x as usize
+    }
+
+    fn set_px(&mut self, x: u16, y: u16, color: Color) {
+        let i = Layer::coords_to_index(x, y);
+        self.changed.borrow_mut()[i] = true;
+        let (px_width, px_height) = Layer::px_size();
+        let x = x as f32 * px_width;
+        let y = y as f32 * px_height;
+        overlay(&mut self.buf[i], &style(
+        if px_width == 0.5 {
+                if x % 1.0 == 0.0 {
+                    '▌'
+                }
+                else {
+                    '▐'
+                }
+            }
+            else if px_height == 0.5 {
+                if y % 1.0 == 0.0 {
+                    '▀'
+                }
+                else {
+                    '▄'
+                }
+            }
+            else {
+                '█'
+            }
+        )
+            .with(color));
         
     }
 }
@@ -124,20 +189,71 @@ impl Layer {
 fn char_at(buf: &Vec<Layer>, i: usize) -> StyledContent<char> {
     let mut c = StyledContent::new(ContentStyle::new(), ' ');
     for layer in buf.iter().rev() {
-        c = overlay(&c, &layer.buf[i]);
-        if overlay_possible(c.content()) {
+        underlay(&mut c, &layer.buf[i]);
+        if !underlay_possible(&c) {
             break;
         }
     }
     c
 }
 
-fn overlay(_c1: &StyledContent<char>, c2: &StyledContent<char>) -> StyledContent<char> {
-    *c2
+/// Overlays c2 over c1, storing the result in c1
+fn overlay(c1: &mut StyledContent<char>, c2: &StyledContent<char>) {
+    if !underlay_possible(c2) {
+        *c1 = *c2
+    }
+    else if c1.content() == c2.content() {
+        let s1 = c1.style_mut();
+        let s2 = c2.style();
+        if s2.foreground_color.is_some() {
+            s1.foreground_color = s2.foreground_color;
+        }
+        if s2.background_color.is_some() {
+            s1.background_color = s2.background_color;
+        }
+    }
+    else {
+        match (c1.content(), c2.content()) {
+            ('▌', '▐') | ('▐', '▌') | ('▀', '▄') | ('▄', '▀') => (*c1.style_mut()).background_color = c2.style().foreground_color,
+            (_, ' ') | (_, '█') => (),
+            _ => *c1 = *c2
+        }
+    }
 }
 
-fn overlay_possible(_c: &char) -> bool {
-    false
+/// Overlays c1 over c2, storing the result in c1
+fn underlay(c1: &mut StyledContent<char>, c2: &StyledContent<char>) {
+    let mut c2 = *c2;
+    overlay(&mut c2, c1);
+    *c1 = c2;
+}
+
+fn underlay_possible(c: &StyledContent<char>) -> bool {
+    if ['▌', '▐', '▀', '▄'].contains(c.content()) {
+        let style = c.style();
+        style.foreground_color.is_none() || style.background_color.is_none()
+    }
+    else {
+        match c.content() {
+            ' ' => c.style().background_color.is_none(),
+            '█' => c.style().foreground_color.is_none(),
+            _ => false
+        }
+    }
+}
+
+// Parts of the following function were taken from code written by Herman J. Radtke III
+// It can be found at https://hermanradtke.com/2015/01/12/terminal-window-size-with-rust-ffi.html
+// The original code is licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+// Changes have been made to the code
+#[cfg(unix)]
+fn get_winsize() -> winsize {
+    let w = winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+    let r = unsafe { ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) };
+
+    debug_assert_eq!((w.ws_col, w.ws_row), terminal::size().unwrap());
+
+    w
 }
 
 
