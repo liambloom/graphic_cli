@@ -1,19 +1,18 @@
 // Copyright 2020 Liam Bloom
 // SPDX-License-Identifier: Apache-2.0
 
+//! # Graphic CLI
+//! 
+//! This library allows you to create a GUI in the command line.
+
+#![warn(missing_docs)]
+
 use std::{
-    sync::atomic::AtomicUsize, 
-    convert::From, 
-    error::Error, 
-    fmt, 
-    io::{self, stdout, Write},
+    io::{stdout, Write},
     ops::Deref, 
-    sync::{
-        PoisonError, TryLockError, 
-        atomic::{AtomicBool, Ordering}, 
-    },
+    sync::{Once, atomic::{AtomicUsize, Ordering}},
     rc::Rc,
-    cell::{RefCell, BorrowError},
+    cell::RefCell,
 };
 use crossterm::{
     QueueableCommand, ExecutableCommand,
@@ -21,27 +20,60 @@ use crossterm::{
     style::{ContentStyle, StyledContent, PrintStyledContent, style},
     terminal, cursor,
 };
-pub use crossterm::style::Color;
 #[cfg(unix)]
 use libc::{winsize, ioctl, STDOUT_FILENO, TIOCGWINSZ};
+#[cfg(unix)]
+use lazy_static::lazy_static;
+pub use crossterm::style::Color;
 
-static CANVAS_ONCE: AtomicBool = AtomicBool::new(true);
+pub mod error;
+use error::*;
 
+#[cfg(windows)]
+static PX_SIZE: (f32, f32) = (1.0, 0.5);
+
+#[cfg(unix)]
+lazy_static! {
+    static ref PX_SIZE: (f32, f32) = {
+        match get_winsize() {
+            Ok(w) => {
+                let ar = (w.ws_xpixel as f64 / w.ws_col as f64) / (w.ws_ypixel as f64 / w.ws_row as f64);
+                if ar < 0.75 {
+                    (1.0, 0.5)
+                }
+                else if ar > 1.333 {
+                    (0.5, 1.0)
+                }
+                else {
+                    (1.0, 1.0)
+                }
+            },
+            Err(_) => (1.0, 0.5)
+        }
+    };
+}
+
+static CANVAS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// The main element of this crate, the `Canvas` element draws to the canvas
 #[derive(Clone, Debug)]
 pub struct Canvas {
+    /// This holds the layers within the canvas.
     pub layers: Vec<Layer>,
     changed: Rc<RefCell<Vec<bool>>>,
 }
 
 impl Canvas {
+    /// Creates a new canvas
     pub fn new() -> Self {
         let mut out = stdout();
         CANVAS_COUNT.fetch_add(1, Ordering::Release);
-        if CANVAS_ONCE.compare_and_swap(true, false, Ordering::AcqRel) {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
             if !out.is_tty() {
                 eprintln!("Stdout is not a terminal");
             }
-        }
+        });
         out.execute(cursor::Hide).expect("Failed to hide the cursor");
         Self {
             layers: Vec::new(),
@@ -49,8 +81,12 @@ impl Canvas {
         }
     }
 
-    pub fn add_layer(&mut self) {
+    /// Creates a new `Layer`, adding it to `self.layers`
+    /// TODO: Add way to add layers in other places (or make
+    /// new_layer() public)
+    pub fn add_layer(&mut self) -> &mut Layer {
         self.layers.push(self.new_layer());
+        self.layers.last_mut().unwrap()
     }
 
     fn new_layer(&self) -> Layer {
@@ -60,10 +96,18 @@ impl Canvas {
         }
     }
 
+    /// Gets the resolution of a canvas
+    pub fn resolution() -> (u16, u16) {
+        let (cols, rows) = terminal::size().expect("Unable to get terminal size");
+        ((cols as f32 / PX_SIZE.0) as u16, (rows as f32 * PX_SIZE.1) as u16)
+    }
+
+    /// Redraws changed parts of the canvas
     pub fn update(&self) -> Result<()> {
         self.update_inner(self.changed.borrow())
     }
 
+    /// Redraws changed parts of the canvas, but only if it won't block
     pub fn try_update(&self) -> Result<()> {
         self.update_inner(self.changed.try_borrow()?)
     }
@@ -75,15 +119,24 @@ impl Canvas {
             if *e {
                 out
                     .queue(cursor::MoveTo((i % cols as usize) as u16, (i / cols as usize) as u16))?
-                    .queue(PrintStyledContent(char_at(&self.layers, i)))?;
+                    .queue(PrintStyledContent(self.char_at(i)))?;
             }
         }
         out.flush()?;
         Ok(())
     }
-}
 
-static CANVAS_COUNT: AtomicUsize = AtomicUsize::new(0);
+    fn char_at(&self, i: usize) -> StyledContent<char> {
+        let mut c = StyledContent::new(ContentStyle::new(), ' ');
+        for layer in self.layers.iter().rev() {
+            underlay(&mut c, &layer.buf[i]);
+            if !underlay_possible(&c) {
+                break;
+            }
+        }
+        c
+    }
+}
 
 impl Drop for Canvas {
     fn drop(&mut self) {
@@ -93,11 +146,11 @@ impl Drop for Canvas {
     }
 }
 
+/// The layer holds image data within a canvas
 #[derive(Clone, Debug)]
 pub struct Layer {
-    pub buf: Vec<StyledContent<char>>,
+    buf: Vec<StyledContent<char>>,
     changed: Rc<RefCell<Vec<bool>>>,
-    //sender: Sender<Message>
 }
 
 impl Layer {
@@ -106,61 +159,94 @@ impl Layer {
         rows as usize * cols as usize
     }
 
-    #[cfg(windows)]
-    pub fn resolution() -> (u16, u16) {
-        let (cols, rows) = terminal::size().expect("Unable to get terminal size");
-        (cols, rows * 2)
-    }
-
-    
-    #[cfg(unix)]
-    pub fn resolution() -> (u16, u16) {
-        let w = get_winsize();
-
-    }
-
+    /// Draws and fills a rectangle to the layer
     pub fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
         for i in y..(y+height) {
             for j in x..(x+width) {
-                self.set_px(i, j, color);
+                self.set_px(j, i, color);
             }
         }
     }
 
-    fn px_size() -> (f32, f32) {
-        let r = Layer::resolution();
-        let (cols, rows) = terminal::size().expect("Unable to get terminal size");
-        let ar = (r.0 as f64 / cols as f64) / (r.1 as f64 / rows as f64);
-        if ar < 0.75 {
-            (1.0, 0.5)
+    /// Draws the outline of a rectangle to the layer
+    /*pub fn draw_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
+        /*for i in x..(x+width) {
+            self.set_px(i, y, color);
+            self.set_px(i, y + height - 1, color);
         }
-        else if ar > 1.333 {
-            (0.5, 1.0)
+        for i in (y+1)..(y + height - 1) {
+            self.set_px(x, i, color);
+            self.set_px(x + width - 1, i, color);
+        }*/
+        self.draw_poly(&[(x, y), (x, y + height), (x + width, y + height), (x + width, y)], color)
+    }*/
+
+    pub fn draw_line<T, P>(&mut self, p1: P, p2: P, color: Color)
+        where T: std::ops::Sub<T, Output = T> + PartialOrd + std::ops::Div<T, Output = T>,
+              P: Point<T> 
+    {
+        // TODO: Use bresenham's line algorithm (it's more efficient)
+        let dx = *p2.x() - *p1.x();
+        let dy = *p2.x() - *p1.y();
+        //let p1 = (p1.0.round() as u16, p1.1.round() as u16);
+        //let p2 = (p2.0.round() as u16, p2.1.round() as u16);
+        if dy <= dx {
+            let m = dy / dx;
+            let range = 
+                if dx > 0.0 { p1.0..=p2.0 }
+                else { p2.0..=p1.0 };
+            for x in range {
+                self.set_px(x, (m * (x - p1.0) as f32).round() as u16 + p1.1, color);
+            }
         }
         else {
-            (1.0, 1.0)
+            let m = dx / dy;
+            let range =
+                if dy > 0.0 { p1.1..=p2.1 }
+                else { p2.1..=p1.1 };
+            for y in range {
+                self.set_px((m * (y - p1.1) as f32).round() as u16 + p1.0, y, color);
+            }
         }
     }
 
+    /*pub fn draw_poly(&mut self, points: &[Point], color: Color) {
+        if points.len() == 1 {
+            self.set_px(points[0].0.round() as u16, points[0].1.round() as u16, color);
+        }
+        else if points.len() > 1 {
+            for i in 0..points.len()-1 {
+                self.draw_line(points[i], points[i + 1], color);
+            }
+            self.draw_line(points[points.len() - 1], points[0], color);
+        }
+    }
+
+    pub fn fill_poly(&mut self, points: &[Point], color: Color) {
+        // It doesn't matter if this is convex, concave, or complex, because
+        // I want to fill the outline, so there won't ever be bits cut off 
+        // from other bits, and I can garuntee that any vertex will be in the
+        // polygon, and therefore an acceptable place to start a flood fill
+    }*/
+
     fn coords_to_index(x: u16, y: u16) -> usize {
-        let r = Layer::resolution();
+        let r = Canvas::resolution();
         if x > r.0 || y > r.1 {
             panic!("Cannot draw outside of bounds");
         }
-        let (px_width, px_height) = Layer::px_size();
-        let x = x as f32 * px_width;
-        let y = y as f32 * px_height;
+        let x = x as f32 * PX_SIZE.0;
+        let y = y as f32 * PX_SIZE.1;
         y as usize * terminal::size().expect("Unable to get terminal size").0 as usize + x as usize
     }
 
-    fn set_px(&mut self, x: u16, y: u16, color: Color) {
+    /// Sets the color of one pixel of the layer
+    pub fn set_px(&mut self, x: u16, y: u16, color: Color) {
         let i = Layer::coords_to_index(x, y);
         self.changed.borrow_mut()[i] = true;
-        let (px_width, px_height) = Layer::px_size();
-        let x = x as f32 * px_width;
-        let y = y as f32 * px_height;
+        let x = x as f32 * PX_SIZE.0;
+        let y = y as f32 * PX_SIZE.1;
         overlay(&mut self.buf[i], &style(
-        if px_width == 0.5 {
+        if PX_SIZE.0 == 0.5 {
                 if x % 1.0 == 0.0 {
                     '▌'
                 }
@@ -168,7 +254,7 @@ impl Layer {
                     '▐'
                 }
             }
-            else if px_height == 0.5 {
+            else if PX_SIZE.1 == 0.5 {
                 if y % 1.0 == 0.0 {
                     '▀'
                 }
@@ -185,16 +271,27 @@ impl Layer {
     }
 }
 
+/// A point type
+//pub type Point = (f32, f32);
 
-fn char_at(buf: &Vec<Layer>, i: usize) -> StyledContent<char> {
-    let mut c = StyledContent::new(ContentStyle::new(), ' ');
-    for layer in buf.iter().rev() {
-        underlay(&mut c, &layer.buf[i]);
-        if !underlay_possible(&c) {
-            break;
-        }
+pub trait Point<T> {
+    fn x(&self) -> &T;
+    fn y(&self) -> &T;
+}
+
+impl<T> Point<T> for (T, T) {
+    fn x(&self) -> &T {
+        &self.0
     }
-    c
+
+    fn y(&self) -> &T {
+        &self.1
+    }
+}
+
+struct LineSegment<T, P: Point<T>> {
+    p1: P,
+    p2: P,
 }
 
 /// Overlays c2 over c1, storing the result in c1
@@ -202,7 +299,7 @@ fn overlay(c1: &mut StyledContent<char>, c2: &StyledContent<char>) {
     if !underlay_possible(c2) {
         *c1 = *c2
     }
-    else if c1.content() == c2.content() {
+    else if c1.content() == c2.content() || ('─'..='╬').contains(c1.content()) {
         let s1 = c1.style_mut();
         let s2 = c2.style();
         if s2.foreground_color.is_some() {
@@ -211,11 +308,17 @@ fn overlay(c1: &mut StyledContent<char>, c2: &StyledContent<char>) {
         if s2.background_color.is_some() {
             s1.background_color = s2.background_color;
         }
+        //let lines = [['─', '━', '═'], ]
+        if ![' ', '█'].contains(c2.content()) {
+            todo!()
+        }
     }
-    else {
-        match (c1.content(), c2.content()) {
-            ('▌', '▐') | ('▐', '▌') | ('▀', '▄') | ('▄', '▀') => (*c1.style_mut()).background_color = c2.style().foreground_color,
-            (_, ' ') | (_, '█') => (),
+    // if c2 is ' ' or '', and it can be underlayed, c2 is entirely transparent,
+    // so c1 stays the same
+    else if ![' ', '█'].contains(c2.content()) {
+        match if c1.content() < c2.content() { (c1.content(), c2.content()) } else { (c2.content(), c1.content()) } {
+            ('▌', '▐') | ('▀', '▄') => (*c1.style_mut()).background_color = c2.style().foreground_color,
+            //('─', '━') => *c1 = StyledContent::new(c1.style()),
             _ => *c1 = *c2
         }
     }
@@ -229,16 +332,13 @@ fn underlay(c1: &mut StyledContent<char>, c2: &StyledContent<char>) {
 }
 
 fn underlay_possible(c: &StyledContent<char>) -> bool {
-    if ['▌', '▐', '▀', '▄'].contains(c.content()) {
-        let style = c.style();
-        style.foreground_color.is_none() || style.background_color.is_none()
-    }
-    else {
-        match c.content() {
-            ' ' => c.style().background_color.is_none(),
-            '█' => c.style().foreground_color.is_none(),
-            _ => false
-        }
+    match c.content() {
+        '█' => c.style().foreground_color.is_none(),
+        '▌' | '▐' | '▀' | '▄' => {
+            let style = c.style();
+            style.foreground_color.is_none() || style.background_color.is_none()
+        },
+        _ => c.style().background_color.is_none(),
     }
 }
 
@@ -247,74 +347,16 @@ fn underlay_possible(c: &StyledContent<char>) -> bool {
 // The original code is licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
 // Changes have been made to the code
 #[cfg(unix)]
-fn get_winsize() -> winsize {
+fn get_winsize() -> Result<winsize> {
     let w = winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
     let r = unsafe { ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) };
 
     debug_assert_eq!((w.ws_col, w.ws_row), terminal::size().unwrap());
 
-    w
-}
-
-
-#[derive(Debug)]
-pub enum ErrorKind {
-    PoisonError,
-    WouldBlock,
-    CrosstermError(crossterm::ErrorKind),
-    IOError(io::Error),
-    BorrowError,
-}
-
-impl Error for ErrorKind {}
-
-impl fmt::Display for ErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use ErrorKind::*;
-
-        match self {
-            PoisonError => write!(f, "poisoned lock: another task failed inside"),
-            WouldBlock => write!(f, "try_lock failed because the operation would block"),
-            CrosstermError(err) => write!(f, "{}", err),
-            IOError(err) => write!(f, "{}", err),
-            BorrowError => write!(f, "already mutably borrowed")
-        }
-    }
-}
-
-pub type Result<T> = std::result::Result<T, ErrorKind>;
-
-impl<T> From<TryLockError<T>> for ErrorKind {
-    fn from(err: TryLockError<T>) -> ErrorKind {
-        use ErrorKind::*;
-
-        match err {
-            TryLockError::Poisoned(_) => PoisonError,
-            TryLockError::WouldBlock => WouldBlock,
-        }
-    }
-}
-
-impl From<crossterm::ErrorKind> for ErrorKind {
-    fn from(err: crossterm::ErrorKind) -> ErrorKind {
-        ErrorKind::CrosstermError(err)
-    }
-}
-
-impl<T> From<PoisonError<T>> for ErrorKind {
-    fn from(_: PoisonError<T>) -> ErrorKind {
-        ErrorKind::PoisonError
-    }
-}
-
-impl From<io::Error> for ErrorKind {
-    fn from(err: io::Error) -> ErrorKind {
-        ErrorKind::IOError(err)
-    }
-}
-
-impl From<BorrowError> for ErrorKind {
-    fn from(_: BorrowError) -> ErrorKind {
-        ErrorKind::BorrowError
+    if r == 0 && w.ws_xpixel > 0 && w.ws_ypixel > 0 && w.ws_col > 0 && w.ws_row > 0 {
+        Ok(w)
+    } 
+    else {
+        Err(io::Error::from(io::ErrorKind::Other).into())
     }
 }
