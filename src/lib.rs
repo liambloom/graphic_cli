@@ -13,6 +13,8 @@ use std::{
     sync::{Once, atomic::{AtomicUsize, Ordering}},
     rc::Rc,
     cell::RefCell,
+    ops::RangeInclusive,
+    iter::Iterator,
 };
 use crossterm::{
     QueueableCommand, ExecutableCommand,
@@ -20,10 +22,12 @@ use crossterm::{
     style::{ContentStyle, StyledContent, PrintStyledContent, style},
     terminal, cursor,
 };
+use num_traits::{Zero, NumRef};
 #[cfg(unix)]
 use libc::{winsize, ioctl, STDOUT_FILENO, TIOCGWINSZ};
 #[cfg(unix)]
 use lazy_static::lazy_static;
+
 pub use crossterm::style::Color;
 
 pub mod error;
@@ -163,13 +167,13 @@ impl Layer {
     pub fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
         for i in y..(y+height) {
             for j in x..(x+width) {
-                self.set_px(j, i, color);
+                self.set_px(&(j, i), color);
             }
         }
     }
 
     /// Draws the outline of a rectangle to the layer
-    /*pub fn draw_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
+    pub fn draw_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
         /*for i in x..(x+width) {
             self.set_px(i, y, color);
             self.set_px(i, y + height - 1, color);
@@ -179,72 +183,68 @@ impl Layer {
             self.set_px(x + width - 1, i, color);
         }*/
         self.draw_poly(&[(x, y), (x, y + height), (x + width, y + height), (x + width, y)], color)
-    }*/
+    }
 
-    pub fn draw_line<T, P>(&mut self, p1: P, p2: P, color: Color)
-        where T: std::ops::Sub<T, Output = T> + PartialOrd + std::ops::Div<T, Output = T>,
-              P: Point<T> 
+    /// Draws a line connecting `p1` and `p2`.
+    pub fn draw_line<T>(&mut self, p1: &impl Point<T>, p2: &impl Point<T>, color: Color)
+        where T: NumRef + PartialOrd + PartialEq + Into<f32> + From<u16> + Zero + Copy,
     {
         // TODO: Use bresenham's line algorithm (it's more efficient)
-        let dx = *p2.x() - *p1.x();
-        let dy = *p2.x() - *p1.y();
+        let dx = p2.x() - p1.x();
+        let dy = p2.x() - p1.y();
         //let p1 = (p1.0.round() as u16, p1.1.round() as u16);
         //let p2 = (p2.0.round() as u16, p2.1.round() as u16);
         if dy <= dx {
             let m = dy / dx;
-            let range = 
-                if dx > 0.0 { p1.0..=p2.0 }
-                else { p2.0..=p1.0 };
+            let range: RangeInclusive<u16> = 
+                if dx > T::zero() { p1.x().into().round() as u16..=p2.x().into().round() as u16 }
+                else { p2.x().into().round() as u16..=p1.x().into().round() as u16 };
             for x in range {
-                self.set_px(x, (m * (x - p1.0) as f32).round() as u16 + p1.1, color);
+                self.set_px(&(T::from(x), m * (T::from(x) - p1.x()) + p1.y()), color);
             }
         }
         else {
             let m = dx / dy;
             let range =
-                if dy > 0.0 { p1.1..=p2.1 }
-                else { p2.1..=p1.1 };
+                if dy > T::zero() { p1.y().into().round() as u16..=p2.y().into().round() as u16 }
+                else { p2.y().into().round() as u16..=p1.y().into().round() as u16 };
             for y in range {
-                self.set_px((m * (y - p1.1) as f32).round() as u16 + p1.0, y, color);
+                self.set_px(&(m * (T::from(y) - p1.y()) + p1.x(), T::from(y)), color);
             }
         }
     }
 
-    /*pub fn draw_poly(&mut self, points: &[Point], color: Color) {
+    /// Outlines a polygon.
+    pub fn draw_poly<T>(&mut self, points: &[impl Point<T>], color: Color)
+        where T: NumRef + PartialOrd + PartialEq + Into<f32> + From<u16> + Zero + Copy,
+              RangeInclusive<T>: Iterator<Item = T>,
+    {
         if points.len() == 1 {
-            self.set_px(points[0].0.round() as u16, points[0].1.round() as u16, color);
+            self.set_px(&points[0], color);
         }
         else if points.len() > 1 {
             for i in 0..points.len()-1 {
-                self.draw_line(points[i], points[i + 1], color);
+                self.draw_line(&points[i], &points[i + 1], color);
             }
-            self.draw_line(points[points.len() - 1], points[0], color);
+            self.draw_line(&points[points.len() - 1], &points[0], color);
         }
     }
 
-    pub fn fill_poly(&mut self, points: &[Point], color: Color) {
+    /*pub fn fill_poly(&mut self, points: &[Point], color: Color) {
         // It doesn't matter if this is convex, concave, or complex, because
         // I want to fill the outline, so there won't ever be bits cut off 
-        // from other bits, and I can garuntee that any vertex will be in the
+        // from other bits, and I can guarantee that any vertex will be in the
         // polygon, and therefore an acceptable place to start a flood fill
     }*/
 
-    fn coords_to_index(x: u16, y: u16) -> usize {
-        let r = Canvas::resolution();
-        if x > r.0 || y > r.1 {
-            panic!("Cannot draw outside of bounds");
-        }
-        let x = x as f32 * PX_SIZE.0;
-        let y = y as f32 * PX_SIZE.1;
-        y as usize * terminal::size().expect("Unable to get terminal size").0 as usize + x as usize
-    }
-
     /// Sets the color of one pixel of the layer
-    pub fn set_px(&mut self, x: u16, y: u16, color: Color) {
-        let i = Layer::coords_to_index(x, y);
+    pub fn set_px<T>(&mut self, p: &impl Point<T>, color: Color)
+        where T: NumRef + PartialOrd + PartialEq + Into<f32>
+    {
+        let i = p.to_index();
         self.changed.borrow_mut()[i] = true;
-        let x = x as f32 * PX_SIZE.0;
-        let y = y as f32 * PX_SIZE.1;
+        let x: f32 = PX_SIZE.0 * Into::<f32>::into(p.x());
+        let y: f32 = Into::<f32>::into(p.y()) * PX_SIZE.1;
         overlay(&mut self.buf[i], &style(
         if PX_SIZE.0 == 0.5 {
                 if x % 1.0 == 0.0 {
@@ -271,27 +271,42 @@ impl Layer {
     }
 }
 
+
+
 /// A point type
-//pub type Point = (f32, f32);
+pub trait Point<T>
+    where T: NumRef + PartialOrd + PartialEq + Into<f32>
+{
+    /// Returns the x-coordinate of the point
+    fn x(&self) -> T;
 
-pub trait Point<T> {
-    fn x(&self) -> &T;
-    fn y(&self) -> &T;
+    /// Returns the y-coordinate of the point
+    fn y(&self) -> T;
+    
+    /// Used internally. Returns the index of a `Layer`'s buffer
+    /// that represents this point
+    fn to_index(&self) -> usize;
 }
 
-impl<T> Point<T> for (T, T) {
-    fn x(&self) -> &T {
-        &self.0
+impl<T> Point<T> for (T, T)
+    where T: NumRef + PartialOrd + PartialEq + Into<f32> + Copy
+{
+    fn x(&self) -> T {
+        self.0
     }
 
-    fn y(&self) -> &T {
-        &self.1
+    fn y(&self) -> T {
+        self.1
     }
-}
 
-struct LineSegment<T, P: Point<T>> {
-    p1: P,
-    p2: P,
+    fn to_index(&self) -> usize {
+        let r = Canvas::resolution();
+        let p = (self.0.into(), self.1.into());
+        if p.0 > r.0.into() || p.1 > r.1.into() {
+            panic!("Cannot draw outside of bounds");
+        }
+        (p.1 * PX_SIZE.1 * terminal::size().expect("Unable to get terminal size").0 as f32 + p.0 * PX_SIZE.0).round() as usize
+    }
 }
 
 /// Overlays c2 over c1, storing the result in c1
@@ -346,6 +361,11 @@ fn underlay_possible(c: &StyledContent<char>) -> bool {
 // It can be found at https://hermanradtke.com/2015/01/12/terminal-window-size-with-rust-ffi.html
 // The original code is licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
 // Changes have been made to the code
+//
+// It is changed enough that I feel it would be acceptable to use, as I don't feel that two lines
+// of code are enough to constitute a "creative work," especially since this is the only way to 
+// use the ioctl function that I am aware of, but it took way to long to find this, so I'm putting
+// a shoutout to hjr3 for posting the code.
 #[cfg(unix)]
 fn get_winsize() -> Result<winsize> {
     let w = winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };

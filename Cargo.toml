@@ -16,6 +16,7 @@ license = "Apache-2.0"
 crossterm = { version = "0.18.2" } #, optional = true } # I've been working on this so long crossterm has had breaking updates
 # paste = "1.0"
 lazy_static = "1.4.0"
+num-traits = "0.2.14"
 
 # I can get the terminal width/height in pixels usin libc::winsize, but not on windows
 [target.'cfg(unix)'.dependencies]
