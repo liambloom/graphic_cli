@@ -167,12 +167,12 @@ impl Layer {
     pub fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
         for i in y..(y+height) {
             for j in x..(x+width) {
-                self.set_px(&(j, i), color);
+                self.plot((j.into(), i.into()), color);
             }
         }
     }
 
-    /// Draws the outline of a rectangle to the layer
+    /*/// Draws the outline of a rectangle to the layer
     pub fn draw_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
         /*for i in x..(x+width) {
             self.set_px(i, y, color);
@@ -183,15 +183,13 @@ impl Layer {
             self.set_px(x + width - 1, i, color);
         }*/
         self.draw_poly(&[(x, y), (x, y + height), (x + width, y + height), (x + width, y)], color)
-    }
+    }*/
 
     /// Draws a line connecting `p1` and `p2`.
-    pub fn draw_line<T>(&mut self, p1: &impl Point<T>, p2: &impl Point<T>, color: Color)
-        where T: NumRef + PartialOrd + PartialEq + Into<f32> + From<u16> + Zero + Copy,
-    {
+    pub fn draw_line<T>(&mut self, p1: &Point, p2: &Point, color: Color) {
         // TODO: Use bresenham's line algorithm (it's more efficient)
-        let dx = p2.x() - p1.x();
-        let dy = p2.x() - p1.y();
+        let dx = p2.0 - p1.0;
+        let dy = p2.1 - p1.1;
         //let p1 = (p1.0.round() as u16, p1.1.round() as u16);
         //let p2 = (p2.0.round() as u16, p2.1.round() as u16);
         if dy <= dx {
@@ -200,7 +198,7 @@ impl Layer {
                 if dx > T::zero() { p1.x().into().round() as u16..=p2.x().into().round() as u16 }
                 else { p2.x().into().round() as u16..=p1.x().into().round() as u16 };
             for x in range {
-                self.set_px(&(T::from(x), m * (T::from(x) - p1.x()) + p1.y()), color);
+                self.plot(&(T::from(x), m * (T::from(x) - p1.x()) + p1.y()), color);
             }
         }
         else {
@@ -209,12 +207,12 @@ impl Layer {
                 if dy > T::zero() { p1.y().into().round() as u16..=p2.y().into().round() as u16 }
                 else { p2.y().into().round() as u16..=p1.y().into().round() as u16 };
             for y in range {
-                self.set_px(&(m * (T::from(y) - p1.y()) + p1.x(), T::from(y)), color);
+                self.plot(&(m * (T::from(y) - p1.y()) + p1.x(), T::from(y)), color);
             }
         }
     }
 
-    /// Outlines a polygon.
+    /*/// Outlines a polygon.
     pub fn draw_poly<T>(&mut self, points: &[impl Point<T>], color: Color)
         where T: NumRef + PartialOrd + PartialEq + Into<f32> + From<u16> + Zero + Copy,
               RangeInclusive<T>: Iterator<Item = T>,
@@ -228,7 +226,7 @@ impl Layer {
             }
             self.draw_line(&points[points.len() - 1], &points[0], color);
         }
-    }
+    }*/
 
     /*pub fn fill_poly(&mut self, points: &[Point], color: Color) {
         // It doesn't matter if this is convex, concave, or complex, because
@@ -238,13 +236,11 @@ impl Layer {
     }*/
 
     /// Sets the color of one pixel of the layer
-    pub fn set_px<T>(&mut self, p: &impl Point<T>, color: Color)
-        where T: NumRef + PartialOrd + PartialEq + Into<f32>
-    {
-        let i = p.to_index();
+    pub fn plot(&mut self, p: (f32, f32), color: Color) {
+        let i = point_to_index(&p);
         self.changed.borrow_mut()[i] = true;
-        let x: f32 = PX_SIZE.0 * Into::<f32>::into(p.x());
-        let y: f32 = Into::<f32>::into(p.y()) * PX_SIZE.1;
+        let x = p.0 * PX_SIZE.0;
+        let y = p.1 * PX_SIZE.1;
         overlay(&mut self.buf[i], &style(
         if PX_SIZE.0 == 0.5 {
                 if x % 1.0 == 0.0 {
@@ -267,28 +263,20 @@ impl Layer {
             }
         )
             .with(color));
-        
     }
 }
 
+type Point = (f32, f32);
 
-
-/// A point type
-pub trait Point<T>
-    where T: NumRef + PartialOrd + PartialEq + Into<f32>
-{
-    /// Returns the x-coordinate of the point
-    fn x(&self) -> T;
-
-    /// Returns the y-coordinate of the point
-    fn y(&self) -> T;
-    
-    /// Used internally. Returns the index of a `Layer`'s buffer
-    /// that represents this point
-    fn to_index(&self) -> usize;
+fn point_to_index(p: &Point) -> usize {
+    let r = Canvas::resolution();
+    if p.0 > r.0.into() || p.1 > r.1.into() {
+        panic!("Cannot draw outside of bounds");
+    }
+    (p.1 * PX_SIZE.1 * terminal::size().expect("Unable to get terminal size").0 as f32 + p.0 * PX_SIZE.0).round() as usize
 }
 
-impl<T> Point<T> for (T, T)
+/*impl<T> Point<T> for (T, T)
     where T: NumRef + PartialOrd + PartialEq + Into<f32> + Copy
 {
     fn x(&self) -> T {
@@ -298,16 +286,7 @@ impl<T> Point<T> for (T, T)
     fn y(&self) -> T {
         self.1
     }
-
-    fn to_index(&self) -> usize {
-        let r = Canvas::resolution();
-        let p = (self.0.into(), self.1.into());
-        if p.0 > r.0.into() || p.1 > r.1.into() {
-            panic!("Cannot draw outside of bounds");
-        }
-        (p.1 * PX_SIZE.1 * terminal::size().expect("Unable to get terminal size").0 as f32 + p.0 * PX_SIZE.0).round() as usize
-    }
-}
+}*/
 
 /// Overlays c2 over c1, storing the result in c1
 fn overlay(c1: &mut StyledContent<char>, c2: &StyledContent<char>) {
