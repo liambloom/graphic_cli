@@ -10,15 +10,21 @@ use std::{
     fmt,
     io,
 };
-
+use bmp::BmpError;
 /// The kinds of errors possible in this crate
 #[derive(Debug)]
 pub enum ErrorKind {
     /// An error originating in the `crossterm` crate
     CrosstermError(crossterm::ErrorKind),
 
+    /// An error originating in the `bmp` crate
+    BmpError(BmpError),
+
     /// An error originating in `std::io`
     IOError(io::Error),
+
+    /// An attempt was made to plot a point out of bounds
+    InvalidPoint(f32, f32),
 
     /// An error originating from borrowing a `RefCell`
     BorrowError,
@@ -33,7 +39,9 @@ impl fmt::Display for ErrorKind {
         match self {
             CrosstermError(err) => write!(f, "{}", err),
             IOError(err) => write!(f, "{}", err),
-            BorrowError => write!(f, "already mutably borrowed")
+            BmpError(err) => write!(f, "{}", err),
+            InvalidPoint(x, y) => write!(f, "Invalid Point: ({}, {})", x, y),
+            BorrowError => write!(f, "already mutably borrowed"),
         }
     }
 }
@@ -56,5 +64,11 @@ impl From<io::Error> for ErrorKind {
 impl From<BorrowError> for ErrorKind {
     fn from(_: BorrowError) -> ErrorKind {
         ErrorKind::BorrowError
+    }
+}
+
+impl From<BmpError> for ErrorKind {
+    fn from(err: BmpError) -> ErrorKind {
+        ErrorKind::BmpError(err)
     }
 }

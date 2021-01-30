@@ -5,16 +5,17 @@
 //! 
 //! This library allows you to create a GUI in the command line.
 
+// TODO: Move functions to Canvas if they can be
+
 #![warn(missing_docs)]
 
 use std::{
-    io::{stdout, Write},
-    ops::Deref, 
-    sync::{Once, atomic::{AtomicUsize, Ordering}},
-    rc::Rc,
-    cell::RefCell,
-    ops::RangeInclusive,
-    iter::Iterator,
+    cell::RefCell, 
+    io::{stdout, Read, Write}, 
+    iter::Iterator, 
+    ops::Deref,
+    rc::Rc, 
+    sync::{Once, atomic::{AtomicUsize, Ordering}}
 };
 use crossterm::{
     QueueableCommand, ExecutableCommand,
@@ -22,7 +23,8 @@ use crossterm::{
     style::{ContentStyle, StyledContent, PrintStyledContent, style},
     terminal, cursor,
 };
-use num_traits::{Zero, NumRef};
+use bmp;
+//pub use rasterizer::{Rasterizer, Point};
 #[cfg(unix)]
 use libc::{winsize, ioctl, STDOUT_FILENO, TIOCGWINSZ};
 #[cfg(unix)]
@@ -162,85 +164,22 @@ impl Layer {
         let (cols, rows) = terminal::size().expect("Unable to get terminal size");
         rows as usize * cols as usize
     }
+}
 
-    /// Draws and fills a rectangle to the layer
-    pub fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
-        for i in y..(y+height) {
-            for j in x..(x+width) {
-                self.plot((j.into(), i.into()), color);
-            }
-        }
-    }
-
-    /*/// Draws the outline of a rectangle to the layer
-    pub fn draw_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) {
-        /*for i in x..(x+width) {
-            self.set_px(i, y, color);
-            self.set_px(i, y + height - 1, color);
-        }
-        for i in (y+1)..(y + height - 1) {
-            self.set_px(x, i, color);
-            self.set_px(x + width - 1, i, color);
-        }*/
-        self.draw_poly(&[(x, y), (x, y + height), (x + width, y + height), (x + width, y)], color)
-    }*/
-
-    /// Draws a line connecting `p1` and `p2`.
-    pub fn draw_line<T>(&mut self, p1: &Point, p2: &Point, color: Color) {
-        // TODO: Use bresenham's line algorithm (it's more efficient)
-        let dx = p2.0 - p1.0;
-        let dy = p2.1 - p1.1;
-        //let p1 = (p1.0.round() as u16, p1.1.round() as u16);
-        //let p2 = (p2.0.round() as u16, p2.1.round() as u16);
-        if dy <= dx {
-            let m = dy / dx;
-            let range: RangeInclusive<u16> = 
-                if dx > T::zero() { p1.x().into().round() as u16..=p2.x().into().round() as u16 }
-                else { p2.x().into().round() as u16..=p1.x().into().round() as u16 };
-            for x in range {
-                self.plot(&(T::from(x), m * (T::from(x) - p1.x()) + p1.y()), color);
-            }
-        }
-        else {
-            let m = dx / dy;
-            let range =
-                if dy > T::zero() { p1.y().into().round() as u16..=p2.y().into().round() as u16 }
-                else { p2.y().into().round() as u16..=p1.y().into().round() as u16 };
-            for y in range {
-                self.plot(&(m * (T::from(y) - p1.y()) + p1.x(), T::from(y)), color);
-            }
-        }
-    }
-
-    /*/// Outlines a polygon.
-    pub fn draw_poly<T>(&mut self, points: &[impl Point<T>], color: Color)
-        where T: NumRef + PartialOrd + PartialEq + Into<f32> + From<u16> + Zero + Copy,
-              RangeInclusive<T>: Iterator<Item = T>,
-    {
-        if points.len() == 1 {
-            self.set_px(&points[0], color);
-        }
-        else if points.len() > 1 {
-            for i in 0..points.len()-1 {
-                self.draw_line(&points[i], &points[i + 1], color);
-            }
-            self.draw_line(&points[points.len() - 1], &points[0], color);
-        }
-    }*/
-
-    /*pub fn fill_poly(&mut self, points: &[Point], color: Color) {
-        // It doesn't matter if this is convex, concave, or complex, because
-        // I want to fill the outline, so there won't ever be bits cut off 
-        // from other bits, and I can guarantee that any vertex will be in the
-        // polygon, and therefore an acceptable place to start a flood fill
-    }*/
-
+impl Layer {
     /// Sets the color of one pixel of the layer
-    pub fn plot(&mut self, p: (f32, f32), color: Color) {
-        let i = point_to_index(&p);
+    pub fn plot(&mut self, p: IPoint, color: Color) -> Result<()> {
+        //p = (p.0.floor(), p.1.floor());
+        self.validate_iPoints(&[p])?;
+        let r = Canvas::resolution();
+        if p.0 > r.0 || p.1 > r.1 {
+            panic!("Cannot draw outside of bounds");
+        }
+        let i = (p.1 as f32 * PX_SIZE.1) as usize * terminal::size().expect("Unable to get terminal size").0 as usize + (p.0 as f32 * PX_SIZE.0) as usize;
+        //let i = iPoint_to_index(&p);
         self.changed.borrow_mut()[i] = true;
-        let x = p.0 * PX_SIZE.0;
-        let y = p.1 * PX_SIZE.1;
+        let x = p.0 as f32 * PX_SIZE.0;
+        let y = p.1 as f32 * PX_SIZE.1;
         overlay(&mut self.buf[i], &style(
         if PX_SIZE.0 == 0.5 {
                 if x % 1.0 == 0.0 {
@@ -263,30 +202,113 @@ impl Layer {
             }
         )
             .with(color));
+        Ok(())
+    }
+
+    fn resolution(&self) -> (usize, usize) {
+        let res = Canvas::resolution();
+        (res.0 as usize, res.0 as usize)
+    }
+
+    /// Draws a line connecting points `p0` and `p1`
+    pub fn line(&mut self, p0: FPoint, p1: FPoint, color: Color) -> Result<()> {
+        // Bresenham's Line algorithm with sub-pixel precision is here
+        // https://stackoverflow.com/questions/41195973/how-to-use-bresenhams-line-drawing-algorithm-with-sub-pixel-bias
+        // I'm not using it because having a high precision (a high `scale`), the loop
+        // runs like a bazillion times, so it doesn't matter how efficient the algorithm
+        // is, it's not that much faster than DDA. DDA is a slightly slower algorithm, 
+        // but it's easier, and loops fewer times (far fewer with a high precision).
+        // Maybe I could even modify DDA to keep track of how far off it is to be self
+        // correcting (because DDA becomes offset from correct after a long distance)
+        self.validate_fPoints(&[p0, p1])?;
+        let dx = p1.0 - p0.0;
+        let dy = p1.1 - p0.1;
+        let steps;
+        let mut x;
+        let mut y;
+        if dx.abs() > dy.abs() {
+            x = p0.0.floor() + 0.5;
+            y = p0.1 + (p0.0 - x) * (dy / dx);
+            steps = dx.abs();
+        } 
+        else {
+            y = p0.1.floor() + 0.5;
+            x = p0.0 + (p0.1 - y) * (dx / dy);
+            steps = dy.abs();
+        }
+        let x_step = dx / steps;
+        let y_step = dy / steps;
+        for _ in 0..=steps.round() as i32 {
+            self.plot((x as u16, y as u16), color)?;
+            x += x_step;
+            y += y_step;
+        }
+        Ok(())
+    }
+
+    /// Draws and fills a rectangle to the layer
+    pub fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) -> Result<()> {
+        self.validate_iPoints(&[(x, y), (width, height)])?;
+        for y in y..(y + height) {
+            for x in x..(x + width) {
+                self.plot((x, y), color)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn draw_img(&mut self, x: u16, y: u16, src: &mut impl Read) -> Result<()> {
+        let img = bmp::from_reader(src)?;
+        for px in img.coordinates() {
+            let px_color = img.get_pixel(px.0, px.1);
+            self.plot((x + px.0 as u16, y + px.1 as u16), Color::Rgb { r: px_color.r, g: px_color.g, b: px_color.b })?;
+        }
+        Ok(())
+    }
+
+    fn validate_fPoints(&self, points: &[FPoint]) -> Result<()> {
+        let resolution = self.resolution();
+        let resolution = (resolution.0 as f32, resolution.1 as f32);
+        for point in points {
+            if point.0 < 0.0 || point.0.round() >= resolution.0 || point.1 < 0.0 || point.1.round() >= resolution.1 {
+                return Err(ErrorKind::InvalidPoint(point.0, point.1))
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_iPoints(&self, points: &[IPoint]) -> Result<()> {
+        let resolution = self.resolution();
+        let resolution = (resolution.0 as u16, resolution.1 as u16);
+        for point in points {
+            if point.0 < 0 || point.0 >= resolution.0 || point.1 < 0 || point.1 >= resolution.1 {
+                return Err(ErrorKind::InvalidPoint(point.0 as f32, point.1 as f32))
+            }
+        }
+        Ok(())
     }
 }
 
-type Point = (f32, f32);
+/// Point type
+pub type FPoint = (f32, f32);
+pub type IPoint = (u16, u16);
 
-fn point_to_index(p: &Point) -> usize {
+/*fn fPoint_to_index(p: &FPoint) -> usize {
     let r = Canvas::resolution();
     if p.0 > r.0.into() || p.1 > r.1.into() {
         panic!("Cannot draw outside of bounds");
     }
-    (p.1 * PX_SIZE.1 * terminal::size().expect("Unable to get terminal size").0 as f32 + p.0 * PX_SIZE.0).round() as usize
+    (p.1 * PX_SIZE.1 * terminal::size().expect("Unable to get terminal size").0 as f32) as usize + (p.0 * PX_SIZE.0) as usize
 }
 
-/*impl<T> Point<T> for (T, T)
-    where T: NumRef + PartialOrd + PartialEq + Into<f32> + Copy
-{
-    fn x(&self) -> T {
-        self.0
+fn iPoint_to_index(p: &IPoint) -> usize {
+    let r = Canvas::resolution();
+    if p.0 > r.0 || p.1 > r.1 {
+        panic!("Cannot draw outside of bounds");
     }
-
-    fn y(&self) -> T {
-        self.1
-    }
+    (p.1 as f32 * PX_SIZE.1 * terminal::size().expect("Unable to get terminal size").0 as f32) as usize + (p.0 as f32 * PX_SIZE.0) as usize
 }*/
+
 
 /// Overlays c2 over c1, storing the result in c1
 fn overlay(c1: &mut StyledContent<char>, c2: &StyledContent<char>) {
