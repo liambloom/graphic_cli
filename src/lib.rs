@@ -6,6 +6,10 @@
 //! This library allows you to create a GUI in the command line.
 
 // TODO: Move functions to Canvas if they can be
+// TODO: Use mpsc to send data from layer to canvas
+
+// TODO: To make the screen restore when done (like vim) use:
+// crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen}
 
 #![warn(missing_docs)]
 
