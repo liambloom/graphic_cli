@@ -8,9 +8,6 @@
 // TODO: Move functions to Canvas if they can be
 // TODO: Use mpsc to send data from layer to canvas
 
-// TODO: To make the screen restore when done (like vim) use:
-// crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen}
-
 #![warn(missing_docs)]
 
 use std::{
@@ -19,13 +16,14 @@ use std::{
     iter::Iterator, 
     ops::Deref,
     rc::Rc, 
-    sync::{Once, atomic::{AtomicUsize, Ordering}}
+    sync::{Once, atomic::{AtomicUsize, Ordering}, mpsc::{channel, Sender, Receiver}, Arc},
+    thread::{self, JoinHandle},
 };
 use crossterm::{
-    QueueableCommand, ExecutableCommand,
     tty::IsTty,
     style::{ContentStyle, StyledContent, PrintStyledContent, style},
-    terminal, cursor,
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen}, 
+    cursor, execute, queue
 };
 use bmp;
 //pub use rasterizer::{Rasterizer, Point};
@@ -65,30 +63,66 @@ lazy_static! {
 
 static CANVAS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+pub enum ResizeType {
+    Manual(Box<dyn FnMut() -> ()>),
+    Auto(ResizeAxis, ResizeAxis)
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum ResizeAxis {
+    /// Either the top (vertical) or left (horizontal)
+    Start,
+
+    /// Center, rounds towards the start
+    CenterRoundDown,
+
+    /// Center, rounds towards the end
+    CenterRoundUp,
+
+    /// Either the bottom (vertical) or right (horizontal)
+    End,
+}
+
+#[derive(Copy, Clone, Debug)]
+enum Message {
+    Update,
+}
+
 /// The main element of this crate, the `Canvas` element draws to the canvas
-#[derive(Clone, Debug)]
+//#[derive(/*Clone, */Debug)]
 pub struct Canvas {
     /// This holds the layers within the canvas.
+    // TODO: Make accessible from multiple threads (so I can update from a listener thread)
     pub layers: Vec<Layer>,
+
+    /// What to do when the terminal is resized. Defaults to `ResizeType::Auto(ResizeAxis::Start, ResizeAxis::Start)`
+    pub resize_type: ResizeType,
+
+    // TODO: Make accessible from multiple threads
+    // TODO: Replace with more efficient data structure, like HashMap ~~or BTreeMap~~
     changed: Rc<RefCell<Vec<bool>>>,
+    sender: Sender<Message>,
+    listener: JoinHandle<()>,
 }
 
 impl Canvas {
     /// Creates a new canvas
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         let mut out = stdout();
-        CANVAS_COUNT.fetch_add(1, Ordering::Release);
+        if CANVAS_COUNT.fetch_add(1, Ordering::AcqRel) == 0 { 
+            execute!(out, EnterAlternateScreen, cursor::Hide)?;
+        }
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
             if !out.is_tty() {
                 eprintln!("Stdout is not a terminal");
             }
         });
-        out.execute(cursor::Hide).expect("Failed to hide the cursor");
-        Self {
+        Ok(Self {
             layers: Vec::new(),
+            resize_type: ResizeType::Auto(ResizeAxis::Start, ResizeAxis::Start),
             changed: Rc::new(RefCell::new(vec![true; Layer::size()])),
-        }
+        })
     }
 
     /// Creates a new `Layer`, adding it to `self.layers`
@@ -127,9 +161,9 @@ impl Canvas {
         let mut out = stdout();
         for (i, e) in changed.iter().enumerate() {
             if *e {
-                out
-                    .queue(cursor::MoveTo((i % cols as usize) as u16, (i / cols as usize) as u16))?
-                    .queue(PrintStyledContent(self.char_at(i)))?;
+                queue!(out,
+                    cursor::MoveTo((i % cols as usize) as u16, (i / cols as usize) as u16),
+                    PrintStyledContent(self.char_at(i)))?;
             }
         }
         out.flush()?;
@@ -151,13 +185,15 @@ impl Canvas {
 impl Drop for Canvas {
     fn drop(&mut self) {
         if CANVAS_COUNT.fetch_sub(1, Ordering::AcqRel) == 1 {
-            stdout().execute(cursor::Show).expect("Failed to un-hide the cursor");
+            if let Err(e) = execute!(stdout(), cursor::Show, LeaveAlternateScreen) {
+                panic!("Error de-initializing canvas: {}", e);
+            }
         }
     }
 }
 
 /// The layer holds image data within a canvas
-#[derive(Clone, Debug)]
+#[derive(/*Clone, */Debug)]
 pub struct Layer {
     buf: Vec<StyledContent<char>>,
     changed: Rc<RefCell<Vec<bool>>>,

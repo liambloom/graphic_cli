@@ -1,7 +1,6 @@
 target
 Cargo.lock
 *.zip
-.vscode/
 notes.md
 old/
 bin/
