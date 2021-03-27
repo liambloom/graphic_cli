@@ -7,6 +7,7 @@ use std::{
     convert::From, 
     error::Error,
     cell::BorrowError,
+    sync::PoisonError,
     fmt,
     io,
 };
@@ -28,6 +29,9 @@ pub enum ErrorKind {
 
     /// An error originating from borrowing a `RefCell`
     BorrowError,
+
+    /// An error originating from a poisoned `Mutex` or `RwLock`
+    PoisonError
 }
 
 impl Error for ErrorKind {}
@@ -42,6 +46,7 @@ impl fmt::Display for ErrorKind {
             BmpError(err) => write!(f, "{}", err),
             InvalidPoint(x, y) => write!(f, "Invalid Point: ({}, {})", x, y),
             BorrowError => write!(f, "already mutably borrowed"),
+            PoisonError => write!(f, "poisoned lock: another task failed inside"),
         }
     }
 }
@@ -70,5 +75,11 @@ impl From<BorrowError> for ErrorKind {
 impl From<BmpError> for ErrorKind {
     fn from(err: BmpError) -> ErrorKind {
         ErrorKind::BmpError(err)
+    }
+}
+
+impl<T> From<PoisonError<T>> for ErrorKind {
+    fn from(_: PoisonError<T>) -> ErrorKind {
+        ErrorKind::PoisonError
     }
 }

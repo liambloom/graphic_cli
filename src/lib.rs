@@ -16,8 +16,14 @@ use std::{
     iter::Iterator, 
     ops::Deref,
     rc::Rc, 
-    sync::{Once, atomic::{AtomicUsize, Ordering}, mpsc::{channel, Sender, Receiver}, Arc},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{channel, Sender, Receiver},
+        Once, Arc, Mutex, RwLock
+    },
     thread::{self, JoinHandle},
+    marker::PhantomData,
+    collections::HashSet
 };
 use crossterm::{
     tty::IsTty,
@@ -83,24 +89,60 @@ pub enum ResizeAxis {
     End,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 enum Message {
-    Update,
+    /// Tells the listener that something a modification is about to be
+    /// made, and that it should now wait until updateLock is free
+    DrawStarted,
+
+    /// Terminates the thread
+    End,
+    // Redraw all characters
+    //Redraw,
 }
 
 /// The main element of this crate, the `Canvas` element draws to the canvas
 //#[derive(/*Clone, */Debug)]
 pub struct Canvas {
     /// This holds the layers within the canvas.
+
     // TODO: Make accessible from multiple threads (so I can update from a listener thread)
-    pub layers: Vec<Layer>,
+    // To avoid deadlock: If updating is the only thing that ever requires both "changed" and
+    //      "layer", and there's only one thread on which updating can happen (make Canvas#update
+    //      just call sender.send(Message::Update)), then they will never deadlock. Note: this 
+    //      means I can not expose a public interface for changed or for waiting for an update
+    // ^ I think the above solution is inconvenient for users and probably wouldn't work, since
+    //      waiting layers to have no references might take a long time
+    // NEW IDEA: Make the buffer inside a layer be Arc<Mutex<Vec<StyledContent<char>>>> or
+    //      Arc<RwLock<Vec<StyledContent<char>>>>, and replace Canvas#layers with a clone of that
+    //      Arc, instead of the Layer. This would allow me to access the layers' buffers without 
+    //      accessing the layers themselves
+    // ^ This idea doesn't solve the deadlock, although it does make the solution I mentioned
+    //      previously a bit more palatable, as the user couldn't keep a layer until an update
+    //      finished, so only I would have to be careful with a public "wait for update" method.
+    // ^ Also, while it does work, it does involve the type Vec<Arc<Mutex<Vec<StyledContent<char>>>>>,
+    //      which is just stupidly long (and also requires following 4 pointers to get to anything)
+    // ^ Also also, Idk if making each layer have its own lock would slow down or speed up the program
+    // ANOTHER NEW IDEA: Each layer's buffer is an Arc<Vec<Mutex<StyledContent<char>>>>>. Since Mutex 
+    //      have interior mutability, both update and draw would only be required to borrow the content
+    //      of the Arc immutably, which means they can both work at the same time. 
+    // ^ Still doesn't solve
+    //      deadlock (although makes it less likely)
+    // ^ Is there any way to have the updater thread update
+    // TODO: No. This is not an acceptable type
+    pub layers: Arc<Vec<Arc<Vec<Mutex<StyledContent<char>>>>>>,
 
     /// What to do when the terminal is resized. Defaults to `ResizeType::Auto(ResizeAxis::Start, ResizeAxis::Start)`
     pub resize_type: ResizeType,
 
     // TODO: Make accessible from multiple threads
-    // TODO: Replace with more efficient data structure, like HashMap ~~or BTreeMap~~
-    changed: Rc<RefCell<Vec<bool>>>,
+    // TODO: Replace with more efficient data structure, like HashSet ~~or BTreeSet~~
+    changed: Arc<Mutex<HashSet<usize>>>,
+    // RwLock may not be the perfect solution (and how it works depends on the kernel),
+    //      see https://www.reddit.com/r/rust/comments/f4zldz/i_audited_3_different_implementation_of_async/?utm_source=share&utm_medium=web2x&context=3
+    //      but it is approximately what I want (behavior-wise, not intent-wise), so it's good
+    //      enough for now.
+    updateLock: Arc<RwLock<()>>,
     sender: Sender<Message>,
     listener: JoinHandle<()>,
 }
@@ -118,25 +160,38 @@ impl Canvas {
                 eprintln!("Stdout is not a terminal");
             }
         });
+        let layers = Arc::new(Vec::new());
+        let changed = Arc::new(Mutex::new(HashSet::new()));
+        let updateLock = Arc::new(RwLock::new(()));
+        let (sender, receiver) = channel();
         Ok(Self {
-            layers: Vec::new(),
+            layers: Arc::clone(&layers),
             resize_type: ResizeType::Auto(ResizeAxis::Start, ResizeAxis::Start),
-            changed: Rc::new(RefCell::new(vec![true; Layer::size()])),
+            changed: Arc::clone(&changed),
+            sender,
+            updateLock: Arc::clone(&updateLock),
+            listener: thread::spawn(move || {
+                loop {
+                    let msg = receiver.recv();
+                    match msg {
+                        DrawStarted => {
+                            let _lock = updateLock.write();
+                        },
+                        End => return,
+                    }
+                }
+            }),
         })
     }
 
-    /// Creates a new `Layer`, adding it to `self.layers`
-    /// TODO: Add way to add layers in other places (or make
-    /// new_layer() public)
-    pub fn add_layer(&mut self) -> &mut Layer {
-        self.layers.push(self.new_layer());
-        self.layers.last_mut().unwrap()
-    }
-
-    fn new_layer(&self) -> Layer {
+    pub fn new_layer<'a>(&'a self) -> Layer<'a> {
+        let buf = Arc::new(vec![Mutex::new(StyledContent::new(ContentStyle::new(), ' ')); Layer::size()]);
+        // TODO: Add buf to canvas/listener layer list
+        // TODO: Add method to add layers in different places
         Layer {
-            buf: vec![StyledContent::new(ContentStyle::new(), ' '); Layer::size()],
-            changed: Rc::clone(&self.changed),
+            buf,
+            changed: Arc::clone(&self.changed),
+            phantom: PhantomData
         }
     }
 
@@ -184,29 +239,32 @@ impl Canvas {
 
 impl Drop for Canvas {
     fn drop(&mut self) {
+        self.sender.send(Message::End);
         if CANVAS_COUNT.fetch_sub(1, Ordering::AcqRel) == 1 {
             if let Err(e) = execute!(stdout(), cursor::Show, LeaveAlternateScreen) {
                 panic!("Error de-initializing canvas: {}", e);
             }
         }
+        self.listener.join();
     }
 }
 
 /// The layer holds image data within a canvas
 #[derive(/*Clone, */Debug)]
-pub struct Layer {
-    buf: Vec<StyledContent<char>>,
-    changed: Rc<RefCell<Vec<bool>>>,
+pub struct Layer<'a> {
+    buf: Arc<Vec<Mutex<StyledContent<char>>>>,
+    changed: Arc<Mutex<HashSet<usize>>>,
+    phantom: PhantomData<&'a ()>,
 }
 
-impl Layer {
+impl<'a> Layer<'a> {
     fn size() -> usize {
         let (cols, rows) = terminal::size().expect("Unable to get terminal size");
         rows as usize * cols as usize
     }
 }
 
-impl Layer {
+impl<'a> Layer<'a> {
     /// Sets the color of one pixel of the layer
     pub fn plot(&mut self, p: IPoint, color: Color) -> Result<()> {
         //p = (p.0.floor(), p.1.floor());
