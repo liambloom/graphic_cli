@@ -11,14 +11,12 @@
 #![warn(missing_docs)]
 
 use std::{
-    cell::RefCell, 
-    io::{stdout, Read, Write}, 
+    io::{stdout, Read, Write, Stdout}, 
     iter::Iterator, 
     ops::Deref,
-    rc::Rc, 
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc::{channel, Sender, Receiver},
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{channel, Sender},
         Once, Arc, Mutex, RwLock
     },
     thread::{self, JoinHandle},
@@ -32,7 +30,6 @@ use crossterm::{
     cursor, execute, queue
 };
 use bmp;
-//pub use rasterizer::{Rasterizer, Point};
 #[cfg(unix)]
 use libc::{winsize, ioctl, STDOUT_FILENO, TIOCGWINSZ};
 #[cfg(unix)]
@@ -43,8 +40,10 @@ pub use crossterm::style::Color;
 pub mod error;
 use error::*;
 
+const DEFAULT_PX_SIZE: (f32, f32) = (1.0, 0.5);
+
 #[cfg(windows)]
-static PX_SIZE: (f32, f32) = (1.0, 0.5);
+static PX_SIZE: (f32, f32) = DEFAULT_PX_SIZE;
 
 #[cfg(unix)]
 lazy_static! {
@@ -62,7 +61,7 @@ lazy_static! {
                     (1.0, 1.0)
                 }
             },
-            Err(_) => (1.0, 0.5)
+            Err(_) => DEFAULT_PX_SIZE
         }
     };
 }
@@ -94,6 +93,12 @@ enum Message {
     /// Tells the listener that something a modification is about to be
     /// made, and that it should now wait until updateLock is free
     DrawStarted,
+
+    /// A new layer and its index
+    NewLayer(Arc<Mutex<Vec<StyledContent<char>>>>, usize),
+
+    /// Requests a full redraw
+    FullRedraw,
 
     /// Terminates the thread
     End,
@@ -130,10 +135,12 @@ pub struct Canvas {
     //      deadlock (although makes it less likely)
     // ^ Is there any way to have the updater thread update
     // TODO: No. This is not an acceptable type
-    pub layers: Arc<Vec<Arc<Vec<Mutex<StyledContent<char>>>>>>,
+    //pub layers: Arc<Vec<Arc<Vec<Mutex<StyledContent<char>>>>>>,
 
     /// What to do when the terminal is resized. Defaults to `ResizeType::Auto(ResizeAxis::Start, ResizeAxis::Start)`
     pub resize_type: ResizeType,
+
+    layerCount: Arc<AtomicUsize>,
 
     // TODO: Make accessible from multiple threads
     // TODO: Replace with more efficient data structure, like HashSet ~~or BTreeSet~~
@@ -160,32 +167,100 @@ impl Canvas {
                 eprintln!("Stdout is not a terminal");
             }
         });
-        let layers = Arc::new(Vec::new());
         let changed = Arc::new(Mutex::new(HashSet::new()));
         let updateLock = Arc::new(RwLock::new(()));
+        let layerCount = Arc::new(AtomicUsize::new(0));
         let (sender, receiver) = channel();
         Ok(Self {
-            layers: Arc::clone(&layers),
+            //layers: Arc::clone(&layers),
             resize_type: ResizeType::Auto(ResizeAxis::Start, ResizeAxis::Start),
             changed: Arc::clone(&changed),
+            layerCount: Arc::clone(&layerCount),
             sender,
             updateLock: Arc::clone(&updateLock),
             listener: thread::spawn(move || {
+                use Message::*;
+
+                let layers = Vec::new();
+
                 loop {
-                    let msg = receiver.recv();
+                    let mut msg = receiver.recv().unwrap();
+                    let mut lock = None;
                     match msg {
-                        DrawStarted => {
-                            let _lock = updateLock.write();
-                        },
+                        DrawStarted => lock = Some(updateLock.write().unwrap()),
+                        FullRedraw => lock = Some(updateLock.write().unwrap()),
+                        NewLayer(layer, index) => {
+                            layers.insert(index, layer);
+                            continue;
+                        }
                         End => return,
                     }
+
+                    for msg2 in receiver.try_iter() {
+                        // TODO: This code is repetitive, fix that
+                        match msg2 {
+                            DrawStarted => (),
+                            FullRedraw => msg = msg2,
+                            NewLayer(layer, index) => layers.insert(index, layer),
+                            End => return,
+                        }
+                    }
+
+                    while layerCount.load(Ordering::Acquire) != layers.len() {
+                        for msg2 in receiver.iter() {
+                            match msg2 {
+                                DrawStarted => (),
+                                FullRedraw => msg = msg2,
+                                NewLayer(layer, index) => layers.insert(index, layer),
+                                End => return,
+                            }
+                        }
+                    }
+
+                    if layers.len() == 0 {
+                        continue;
+                    }
+
+                    let layerRefs = Vec::with_capacity(layers.len());
+                    for layer in layers.iter().rev() {
+                        layerRefs.push(layer.lock().unwrap());
+                    }
+
+                    fn update_px(i: usize, out: &Stdout, cols: u16, layerRefs: Vec<impl Deref<Target = Vec<StyledContent<char>>>>) {
+                        let mut c = StyledContent::new(ContentStyle::new(), ' ');
+                        for layer in layerRefs.iter() {
+                            underlay(&mut c, &layer[i]);
+                            if !underlay_possible(&c) {
+                                break;
+                            }
+                        }
+                        queue!(out,
+                            cursor::MoveTo((i % cols as usize) as u16, (i / cols as usize) as u16),
+                            PrintStyledContent(c)).unwrap();
+                    }
+                    let cols = terminal::size().expect("Unable to get terminal size").0;
+                    let mut out = stdout();
+                    if let DrawStarted = msg {
+                        for i in changed.lock().unwrap().iter() {
+                            update_px(*i, &out, cols, layerRefs);
+                        }
+                    }
+                    else {
+                        for i in 0..layerRefs[0].len() {
+                            update_px(i, &out, cols, layerRefs);
+                        }
+                    }
+
+                    out.flush().unwrap();
                 }
             }),
         })
     }
 
     pub fn new_layer<'a>(&'a self) -> Layer<'a> {
-        let buf = Arc::new(vec![Mutex::new(StyledContent::new(ContentStyle::new(), ' ')); Layer::size()]);
+        let _lock = self.updateLock.read();
+        let buf = Arc::new(Mutex::new(vec![StyledContent::new(ContentStyle::new(), ' '); Layer::size()]));
+        self.sender.send(Message::NewLayer(Arc::clone(&buf), self.layerCount.fetch_add(1, Ordering::AcqRel)));
         // TODO: Add buf to canvas/listener layer list
         // TODO: Add method to add layers in different places
         Layer {
@@ -199,41 +274,6 @@ impl Canvas {
     pub fn resolution() -> (u16, u16) {
         let (cols, rows) = terminal::size().expect("Unable to get terminal size");
         ((cols as f32 / PX_SIZE.0) as u16, (rows as f32 * PX_SIZE.1) as u16)
-    }
-
-    /// Redraws changed parts of the canvas
-    pub fn update(&self) -> Result<()> {
-        self.update_inner(self.changed.borrow())
-    }
-
-    /// Redraws changed parts of the canvas, but only if it won't block
-    pub fn try_update(&self) -> Result<()> {
-        self.update_inner(self.changed.try_borrow()?)
-    }
-
-    fn update_inner(&self, changed: impl Deref<Target = Vec<bool>>) -> Result<()> {
-        let cols = terminal::size().expect("Unable to get terminal size").0;
-        let mut out = stdout();
-        for (i, e) in changed.iter().enumerate() {
-            if *e {
-                queue!(out,
-                    cursor::MoveTo((i % cols as usize) as u16, (i / cols as usize) as u16),
-                    PrintStyledContent(self.char_at(i)))?;
-            }
-        }
-        out.flush()?;
-        Ok(())
-    }
-
-    fn char_at(&self, i: usize) -> StyledContent<char> {
-        let mut c = StyledContent::new(ContentStyle::new(), ' ');
-        for layer in self.layers.iter().rev() {
-            underlay(&mut c, &layer.buf[i]);
-            if !underlay_possible(&c) {
-                break;
-            }
-        }
-        c
     }
 }
 
@@ -252,7 +292,7 @@ impl Drop for Canvas {
 /// The layer holds image data within a canvas
 #[derive(/*Clone, */Debug)]
 pub struct Layer<'a> {
-    buf: Arc<Vec<Mutex<StyledContent<char>>>>,
+    buf: Arc<Mutex<Vec<StyledContent<char>>>>,
     changed: Arc<Mutex<HashSet<usize>>>,
     phantom: PhantomData<&'a ()>,
 }
@@ -279,7 +319,7 @@ impl<'a> Layer<'a> {
         let x = p.0 as f32 * PX_SIZE.0;
         let y = p.1 as f32 * PX_SIZE.1;
         overlay(&mut self.buf[i], &style(
-        if PX_SIZE.0 == 0.5 {
+            if PX_SIZE.0 == 0.5 {
                 if x % 1.0 == 0.0 {
                     '▌'
                 }
