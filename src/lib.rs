@@ -11,9 +11,8 @@
 #![warn(missing_docs)]
 
 use std::{
-    io::{stdout, Read, Write, Stdout}, 
-    iter::Iterator, 
-    ops::Deref,
+    io::{stdout, Read, Write}, 
+    iter::Iterator,
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc::{channel, Sender},
@@ -26,8 +25,8 @@ use std::{
 use crossterm::{
     tty::IsTty,
     style::{ContentStyle, StyledContent, PrintStyledContent, style},
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen}, 
-    cursor, execute, queue
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode, disable_raw_mode}, 
+    cursor, execute, queue, ExecutableCommand, QueueableCommand
 };
 use bmp;
 #[cfg(unix)]
@@ -151,7 +150,7 @@ pub struct Canvas {
     //      enough for now.
     updateLock: Arc<RwLock<()>>,
     sender: Sender<Message>,
-    listener: JoinHandle<()>,
+    listener: Option<JoinHandle<()>>,
 }
 
 impl Canvas {
@@ -160,6 +159,7 @@ impl Canvas {
         let mut out = stdout();
         if CANVAS_COUNT.fetch_add(1, Ordering::AcqRel) == 0 { 
             execute!(out, EnterAlternateScreen, cursor::Hide)?;
+            enable_raw_mode()?;
         }
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
@@ -178,17 +178,19 @@ impl Canvas {
             layerCount: Arc::clone(&layerCount),
             sender,
             updateLock: Arc::clone(&updateLock),
-            listener: thread::spawn(move || {
+            // TODO: Add resize listener
+            listener: Some(thread::spawn(move || {
                 use Message::*;
 
-                let layers = Vec::new();
+                let mut layers = Vec::new();
 
+                // TODO: Do peek/poll in a loop to check multiple things (receiver.try_recv() || events::poll())
                 loop {
                     let mut msg = receiver.recv().unwrap();
-                    let mut lock = None;
+                    let mut _lock = None;
                     match msg {
-                        DrawStarted => lock = Some(updateLock.write().unwrap()),
-                        FullRedraw => lock = Some(updateLock.write().unwrap()),
+                        DrawStarted => _lock = Some(updateLock.write().unwrap()),
+                        FullRedraw => _lock = Some(updateLock.write().unwrap()),
                         NewLayer(layer, index) => {
                             layers.insert(index, layer);
                             continue;
@@ -199,7 +201,7 @@ impl Canvas {
                     for msg2 in receiver.try_iter() {
                         // TODO: This code is repetitive, fix that
                         match msg2 {
-                            DrawStarted => (),
+                            DrawStarted => {},
                             FullRedraw => msg = msg2,
                             NewLayer(layer, index) => layers.insert(index, layer),
                             End => return,
@@ -209,7 +211,7 @@ impl Canvas {
                     while layerCount.load(Ordering::Acquire) != layers.len() {
                         for msg2 in receiver.iter() {
                             match msg2 {
-                                DrawStarted => (),
+                                DrawStarted => {},
                                 FullRedraw => msg = msg2,
                                 NewLayer(layer, index) => layers.insert(index, layer),
                                 End => return,
@@ -221,12 +223,14 @@ impl Canvas {
                         continue;
                     }
 
-                    let layerRefs = Vec::with_capacity(layers.len());
+                    let mut layerRefs = Vec::with_capacity(layers.len());
                     for layer in layers.iter().rev() {
                         layerRefs.push(layer.lock().unwrap());
                     }
 
-                    fn update_px(i: usize, out: &Stdout, cols: u16, layerRefs: Vec<impl Deref<Target = Vec<StyledContent<char>>>>) {
+                    let cols = terminal::size().expect("Unable to get terminal size").0;
+                    let mut out = stdout();
+                    let mut update_px = |i: usize| {
                         let mut c = StyledContent::new(ContentStyle::new(), ' ');
                         for layer in layerRefs.iter() {
                             underlay(&mut c, &layer[i]);
@@ -236,32 +240,45 @@ impl Canvas {
                         }
                         queue!(out,
                             cursor::MoveTo((i % cols as usize) as u16, (i / cols as usize) as u16),
-                            PrintStyledContent(c)).unwrap();
-                    }
-                    let cols = terminal::size().expect("Unable to get terminal size").0;
-                    let mut out = stdout();
+                            PrintStyledContent(c)
+                        ).unwrap();
+                    };
                     if let DrawStarted = msg {
-                        for i in changed.lock().unwrap().iter() {
-                            update_px(*i, &out, cols, layerRefs);
+                        for &i in changed.lock().unwrap().iter() {
+                            update_px(i);
                         }
                     }
                     else {
                         for i in 0..layerRefs[0].len() {
-                            update_px(i, &out, cols, layerRefs);
+                            update_px(i);
                         }
                     }
 
                     out.flush().unwrap();
                 }
-            }),
+            })),
         })
     }
 
     pub fn new_layer<'a>(&'a self) -> Layer<'a> {
-        let _lock = self.updateLock.read();
+        /*let _lock = self.updateLock.read();
         let buf = Arc::new(Mutex::new(vec![StyledContent::new(ContentStyle::new(), ' '); Layer::size()]));
         self.sender.send(Message::NewLayer(Arc::clone(&buf), self.layerCount.fetch_add(1, Ordering::AcqRel)));
         // TODO: Add buf to canvas/listener layer list
+        // TODO: Add method to add layers in different places
+        Layer {
+            buf,
+            changed: Arc::clone(&self.changed),
+            phantom: PhantomData
+        }*/
+        self.new_layer_at(self.layerCount.load(Ordering::Acquire))
+    }
+
+    pub fn new_layer_at<'a>(&'a self, i: usize) -> Layer<'a> {
+        let _lock = self.updateLock.read();
+        let buf = Arc::new(Mutex::new(vec![StyledContent::new(ContentStyle::new(), ' '); Layer::size()]));
+        self.layerCount.fetch_add(1, Ordering::Release);
+        self.sender.send(Message::NewLayer(Arc::clone(&buf), i));
         // TODO: Add method to add layers in different places
         Layer {
             buf,
@@ -279,13 +296,22 @@ impl Canvas {
 
 impl Drop for Canvas {
     fn drop(&mut self) {
-        self.sender.send(Message::End);
+        // TODO: Maybe log error caused by listener thread panicking? They don't effect shutdown though, so don't unwrap them
+
+        // "_" doesn't bind
+        let _ = self.sender.send(Message::End);
         if CANVAS_COUNT.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Err(e) = execute!(stdout(), cursor::Show, LeaveAlternateScreen) {
-                panic!("Error de-initializing canvas: {}", e);
-            }
+            let mut out = stdout();
+            //let outRef = &mut out;
+            disable_raw_mode()
+                .and(out.queue(cursor::Show).map(|_| ()))
+                .and(out.queue(LeaveAlternateScreen).map(|_| ()))
+                .and(out.flush().map_err(|e| e.into() ))
+                .expect("Error de-initializing canvas");
         }
-        self.listener.join();
+        // This is known as the option dance
+        // https://users.rust-lang.org/t/spawn-threads-and-join-in-destructor/1613/2
+        let _ = self.listener.take().unwrap().join();
     }
 }
 
@@ -307,8 +333,9 @@ impl<'a> Layer<'a> {
 impl<'a> Layer<'a> {
     /// Sets the color of one pixel of the layer
     pub fn plot(&mut self, p: IPoint, color: Color) -> Result<()> {
+        todo!();
         //p = (p.0.floor(), p.1.floor());
-        self.validate_iPoints(&[p])?;
+        /*self.validate_iPoints(&[p])?;
         let r = Canvas::resolution();
         if p.0 > r.0 || p.1 > r.1 {
             panic!("Cannot draw outside of bounds");
@@ -340,7 +367,7 @@ impl<'a> Layer<'a> {
             }
         )
             .with(color));
-        Ok(())
+        Ok(())*/
     }
 
     fn resolution(&self) -> (usize, usize) {
