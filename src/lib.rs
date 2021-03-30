@@ -15,18 +15,19 @@ use std::{
     iter::Iterator,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc::{channel, Sender},
+        mpsc::{channel, Sender, TryRecvError},
         Once, Arc, Mutex, RwLock
     },
     thread::{self, JoinHandle},
     marker::PhantomData,
-    collections::HashSet
+    collections::HashSet,
+    time::Duration,
 };
 use crossterm::{
     tty::IsTty,
     style::{ContentStyle, StyledContent, PrintStyledContent, style},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode, disable_raw_mode}, 
-    cursor, execute, queue, ExecutableCommand, QueueableCommand
+    cursor, event::{self, Event}, execute, queue, ExecutableCommand, QueueableCommand
 };
 use bmp;
 #[cfg(unix)]
@@ -69,7 +70,7 @@ static CANVAS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub enum ResizeType {
     Manual(Box<dyn FnMut() -> ()>),
-    Auto(ResizeAxis, ResizeAxis)
+    Auto(ResizeAxis, ResizeAxis) // TODO: Add way to add cutoff function (hide edges, stop until resized)
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -153,6 +154,16 @@ pub struct Canvas {
     listener: Option<JoinHandle<()>>,
 }
 
+macro_rules! do_while {
+    (do $block:block while $condition:expr;) => {
+        let mut first = true;
+        while first || ($condition) {
+            first = false;
+            $block
+        }
+    };
+}
+
 impl Canvas {
     /// Creates a new canvas
     pub fn new() -> Result<Self> {
@@ -186,53 +197,59 @@ impl Canvas {
 
                 // TODO: Do peek/poll in a loop to check multiple things (receiver.try_recv() || events::poll())
                 loop {
-                    let mut msg = receiver.recv().unwrap();
                     let mut _lock = None;
-                    match msg {
-                        DrawStarted => _lock = Some(updateLock.write().unwrap()),
-                        FullRedraw => _lock = Some(updateLock.write().unwrap()),
-                        NewLayer(layer, index) => {
-                            layers.insert(index, layer);
-                            continue;
-                        }
-                        End => return,
-                    }
-
-                    for msg2 in receiver.try_iter() {
-                        // TODO: This code is repetitive, fix that
-                        match msg2 {
-                            DrawStarted => {},
-                            FullRedraw => msg = msg2,
-                            NewLayer(layer, index) => layers.insert(index, layer),
-                            End => return,
-                        }
-                    }
-
-                    while layerCount.load(Ordering::Acquire) != layers.len() {
-                        for msg2 in receiver.iter() {
-                            match msg2 {
-                                DrawStarted => {},
-                                FullRedraw => msg = msg2,
-                                NewLayer(layer, index) => layers.insert(index, layer),
-                                End => return,
+                    let msg = if event::poll(Duration::from_secs(0)).unwrap() {
+                            match event::read().unwrap() {
+                                Event::Resize(cols, rows) => {
+                                    todo!()
+                                },
+                                other => {
+                                    todo!();
+                                }
                             }
                         }
-                    }
+                        else {
+                            let mut msg = None;
+                            do_while! {
+                                do {
+                                    loop {
+                                        match receiver.try_recv() {
+                                            Ok(DrawStarted) => {
+                                                msg = msg.or(Some(DrawStarted));
+                                                _lock = _lock.or_else(|| Some(updateLock.write().unwrap()));
+                                            },
+                                            Ok(FullRedraw) => {
+                                                msg = Some(FullRedraw);
+                                                _lock = _lock.or_else(|| Some(updateLock.write().unwrap()));
+                                            },
+                                            Ok(NewLayer(layer, index)) => layers.insert(index, layer),
+                                            Err(TryRecvError::Empty) => break,
+                                            Ok(End) | Err(TryRecvError::Disconnected) => return, 
+                                        }
+                                    }
+                                }
+                                while layerCount.load(Ordering::Acquire) != layers.len();
+                            }
+                            match msg {
+                                Some(msg) => msg,
+                                None => continue,
+                            }
+                        };
 
                     if layers.len() == 0 {
                         continue;
                     }
 
-                    let mut layerRefs = Vec::with_capacity(layers.len());
+                    let mut layer_refs = Vec::with_capacity(layers.len());
                     for layer in layers.iter().rev() {
-                        layerRefs.push(layer.lock().unwrap());
+                        layer_refs.push(layer.lock().unwrap());
                     }
 
                     let cols = terminal::size().expect("Unable to get terminal size").0;
                     let mut out = stdout();
                     let mut update_px = |i: usize| {
                         let mut c = StyledContent::new(ContentStyle::new(), ' ');
-                        for layer in layerRefs.iter() {
+                        for layer in layer_refs.iter() {
                             underlay(&mut c, &layer[i]);
                             if !underlay_possible(&c) {
                                 break;
@@ -249,7 +266,7 @@ impl Canvas {
                         }
                     }
                     else {
-                        for i in 0..layerRefs[0].len() {
+                        for i in 0..layer_refs[0].len() {
                             update_px(i);
                         }
                     }
@@ -261,16 +278,6 @@ impl Canvas {
     }
 
     pub fn new_layer<'a>(&'a self) -> Layer<'a> {
-        /*let _lock = self.updateLock.read();
-        let buf = Arc::new(Mutex::new(vec![StyledContent::new(ContentStyle::new(), ' '); Layer::size()]));
-        self.sender.send(Message::NewLayer(Arc::clone(&buf), self.layerCount.fetch_add(1, Ordering::AcqRel)));
-        // TODO: Add buf to canvas/listener layer list
-        // TODO: Add method to add layers in different places
-        Layer {
-            buf,
-            changed: Arc::clone(&self.changed),
-            phantom: PhantomData
-        }*/
         self.new_layer_at(self.layerCount.load(Ordering::Acquire))
     }
 
@@ -278,7 +285,7 @@ impl Canvas {
         let _lock = self.updateLock.read();
         let buf = Arc::new(Mutex::new(vec![StyledContent::new(ContentStyle::new(), ' '); Layer::size()]));
         self.layerCount.fetch_add(1, Ordering::Release);
-        self.sender.send(Message::NewLayer(Arc::clone(&buf), i));
+        let _ = self.sender.send(Message::NewLayer(Arc::clone(&buf), i));
         // TODO: Add method to add layers in different places
         Layer {
             buf,
