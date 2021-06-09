@@ -6,9 +6,10 @@ edition = "2018"
 license = "Apache-2.0"
 
 [dependencies]
-crossterm = { version = "0.18.2" }
-lazy_static = "1.4.0"
+crossterm = { version = "0.19.0" }
+lazy_static = "1.4"
 bmp = "0.5"
+# num = "0.4"
 
 # I can get the terminal width/height in pixels usin libc::winsize, but not on windows
 [target.'cfg(unix)'.dependencies]

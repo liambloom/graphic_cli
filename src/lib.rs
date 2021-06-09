@@ -11,31 +11,32 @@
 #![warn(missing_docs)]
 
 use std::{
-    io::{stdout, Read, Write}, 
+    io::{stdout, Read, Write, StdoutLock}, 
     iter::Iterator,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicUsize, AtomicBool, Ordering},
         mpsc::{channel, Sender, TryRecvError},
-        Once, Arc, Mutex, RwLock
+        Once, Arc, Mutex, RwLock, Condvar
     },
     thread::{self, JoinHandle},
     marker::PhantomData,
     collections::HashSet,
-    time::Duration,
+    time::{Instant, Duration},
 };
 use crossterm::{
     tty::IsTty,
     style::{ContentStyle, StyledContent, PrintStyledContent, style},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode, disable_raw_mode}, 
-    cursor, event::{self, Event}, execute, queue, ExecutableCommand, QueueableCommand
+    cursor, event, execute, queue, ExecutableCommand, QueueableCommand
 };
+//use num_traits::{Zero, One};
 use bmp;
+use lazy_static::lazy_static;
 #[cfg(unix)]
 use libc::{winsize, ioctl, STDOUT_FILENO, TIOCGWINSZ};
-#[cfg(unix)]
-use lazy_static::lazy_static;
 
 pub use crossterm::style::Color;
+pub use event::{Event, KeyEvent, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, MouseButton};
 
 pub mod error;
 use error::*;
@@ -67,6 +68,10 @@ lazy_static! {
 }
 
 static CANVAS_COUNT: AtomicUsize = AtomicUsize::new(0);
+// IDK if this works
+/*lazy_static! {
+    static ref CANVAS_LOCK: (AtomicBool, Condvar) = (AtomicBool::new(false), Condvar::new());
+}*/
 
 pub enum ResizeType {
     Manual(Box<dyn FnMut() -> ()>),
@@ -140,7 +145,7 @@ pub struct Canvas {
     /// What to do when the terminal is resized. Defaults to `ResizeType::Auto(ResizeAxis::Start, ResizeAxis::Start)`
     pub resize_type: ResizeType,
 
-    layerCount: Arc<AtomicUsize>,
+    layer_count: Arc<AtomicUsize>,
 
     // TODO: Make accessible from multiple threads
     // TODO: Replace with more efficient data structure, like HashSet ~~or BTreeSet~~
@@ -149,7 +154,7 @@ pub struct Canvas {
     //      see https://www.reddit.com/r/rust/comments/f4zldz/i_audited_3_different_implementation_of_async/?utm_source=share&utm_medium=web2x&context=3
     //      but it is approximately what I want (behavior-wise, not intent-wise), so it's good
     //      enough for now.
-    updateLock: Arc<RwLock<()>>,
+    update_lock: Arc<RwLock<()>>,
     sender: Sender<Message>,
     listener: Option<JoinHandle<()>>,
 }
@@ -168,6 +173,8 @@ impl Canvas {
     /// Creates a new canvas
     pub fn new() -> Result<Self> {
         let mut out = stdout();
+        //let out = out.lock();
+        //let stdout_lock_ptr = &stdout_lock as *const StdoutLock<'_>;
         if CANVAS_COUNT.fetch_add(1, Ordering::AcqRel) == 0 { 
             execute!(out, EnterAlternateScreen, cursor::Hide)?;
             enable_raw_mode()?;
@@ -179,26 +186,30 @@ impl Canvas {
             }
         });
         let changed = Arc::new(Mutex::new(HashSet::new()));
-        let updateLock = Arc::new(RwLock::new(()));
-        let layerCount = Arc::new(AtomicUsize::new(0));
+        let update_lock = Arc::new(RwLock::new(()));
+        let layer_count = Arc::new(AtomicUsize::new(0));
         let (sender, receiver) = channel();
+        let out_wrap = Arc::new(Mutex::new(out));
         Ok(Self {
             //layers: Arc::clone(&layers),
             resize_type: ResizeType::Auto(ResizeAxis::Start, ResizeAxis::Start),
             changed: Arc::clone(&changed),
-            layerCount: Arc::clone(&layerCount),
+            layer_count: Arc::clone(&layer_count),
             sender,
-            updateLock: Arc::clone(&updateLock),
+            update_lock: Arc::clone(&update_lock),
             // TODO: Add resize listener
             listener: Some(thread::spawn(move || {
                 use Message::*;
 
+                /*let stdout = stdout();
+                let stdout = stdout.lock();*/
+                //let out = out_wrap.into_inner().unwrap();
                 let mut layers = Vec::new();
 
                 // TODO: Do peek/poll in a loop to check multiple things (receiver.try_recv() || events::poll())
                 loop {
                     let mut _lock = None;
-                    let msg = if event::poll(Duration::from_secs(0)).unwrap() {
+                    let mut msg = if event::poll(Duration::from_secs(0)).unwrap() {
                             match event::read().unwrap() {
                                 Event::Resize(cols, rows) => {
                                     todo!()
@@ -209,32 +220,33 @@ impl Canvas {
                             }
                         }
                         else {
-                            let mut msg = None;
-                            do_while! {
-                                do {
-                                    loop {
-                                        match receiver.try_recv() {
-                                            Ok(DrawStarted) => {
-                                                msg = msg.or(Some(DrawStarted));
-                                                _lock = _lock.or_else(|| Some(updateLock.write().unwrap()));
-                                            },
-                                            Ok(FullRedraw) => {
-                                                msg = Some(FullRedraw);
-                                                _lock = _lock.or_else(|| Some(updateLock.write().unwrap()));
-                                            },
-                                            Ok(NewLayer(layer, index)) => layers.insert(index, layer),
-                                            Err(TryRecvError::Empty) => break,
-                                            Ok(End) | Err(TryRecvError::Disconnected) => return, 
-                                        }
-                                    }
-                                }
-                                while layerCount.load(Ordering::Acquire) != layers.len();
-                            }
-                            match msg {
-                                Some(msg) => msg,
-                                None => continue,
-                            }
+                            None
                         };
+                    do_while! {
+                        do {
+                            loop {
+                                match receiver.try_recv() {
+                                    Ok(DrawStarted) => {
+                                        msg = msg.or(Some(DrawStarted));
+                                        _lock = _lock.or_else(|| Some(update_lock.write().unwrap()));
+                                    },
+                                    Ok(FullRedraw) => {
+                                        msg = Some(FullRedraw);
+                                        _lock = _lock.or_else(|| Some(update_lock.write().unwrap()));
+                                    },
+                                    Ok(NewLayer(layer, index)) => layers.insert(index, layer),
+                                    Err(TryRecvError::Empty) => break,
+                                    Ok(End) | Err(TryRecvError::Disconnected) => return, 
+                                }
+                            }
+                        }
+                        while layer_count.load(Ordering::Acquire) != layers.len();
+                    }
+
+                    let msg = match msg {
+                        Some(msg) => msg,
+                        None => continue,
+                    };
 
                     if layers.len() == 0 {
                         continue;
@@ -246,7 +258,7 @@ impl Canvas {
                     }
 
                     let cols = terminal::size().expect("Unable to get terminal size").0;
-                    let mut out = stdout();
+                    //let mut out = stdout();
                     let mut update_px = |i: usize| {
                         let mut c = StyledContent::new(ContentStyle::new(), ' ');
                         for layer in layer_refs.iter() {
@@ -278,13 +290,16 @@ impl Canvas {
     }
 
     pub fn new_layer<'a>(&'a self) -> Layer<'a> {
-        self.new_layer_at(self.layerCount.load(Ordering::Acquire))
+        self.new_layer_at(self.layer_count.load(Ordering::Acquire))
     }
 
     pub fn new_layer_at<'a>(&'a self, i: usize) -> Layer<'a> {
-        let _lock = self.updateLock.read();
+        let _lock = self.update_lock.read();
         let buf = Arc::new(Mutex::new(vec![StyledContent::new(ContentStyle::new(), ' '); Layer::size()]));
-        self.layerCount.fetch_add(1, Ordering::Release);
+        let len = self.layer_count.fetch_add(1, Ordering::Acquire);
+        if i > len {
+            panic!("Index {} is out of bounds for length {}", i, len);
+        }
         let _ = self.sender.send(Message::NewLayer(Arc::clone(&buf), i));
         // TODO: Add method to add layers in different places
         Layer {
@@ -298,6 +313,10 @@ impl Canvas {
     pub fn resolution() -> (u16, u16) {
         let (cols, rows) = terminal::size().expect("Unable to get terminal size");
         ((cols as f32 / PX_SIZE.0) as u16, (rows as f32 * PX_SIZE.1) as u16)
+    }
+
+    pub fn request_animation_frame(&self, f: impl FnOnce(Instant) + Send) -> i64 {
+        todo!()
     }
 }
 
@@ -420,7 +439,7 @@ impl<'a> Layer<'a> {
 
     /// Draws and fills a rectangle to the layer
     pub fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: Color) -> Result<()> {
-        self.validate_iPoints(&[(x, y), (width, height)])?;
+        self.validate_iPoints(&[(x, y), (x + width, y + height)])?;
         for y in y..(y + height) {
             for x in x..(x + width) {
                 self.plot((x, y), color)?;
@@ -460,6 +479,37 @@ impl<'a> Layer<'a> {
         Ok(())
     }
 }
+
+// NOTE: Methods that need integer points can take arguments of type Point<impl Integer>
+// Should I add Copy trait bound?
+/*pub trait Point<T> {
+    fn x(&self) -> T;
+    fn y(&self) -> T;
+}
+
+impl<T: Copy> Point<T> for (T, T) {
+    fn x(&self) -> T {
+        self.0
+    }
+
+    fn y(&self) -> T {
+        self.1
+    }
+}
+
+trait ToU16: Zero + One + PartialEq + Copy {
+    fn to_u16(self) -> u16 {
+        if self == Self::zero() {
+            0
+        }
+        else {
+            let mut r = 0;
+            let two = Self::one() + Self::one();
+            let n = Self::one();
+
+        }
+    }
+}*/
 
 /// Point type
 pub type FPoint = (f32, f32);
