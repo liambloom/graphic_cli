@@ -67,7 +67,7 @@ lazy_static! {
     };
 }
 
-static CANVAS_COUNT: AtomicUsize = AtomicUsize::new(0);
+//static CANVAS_COUNT: AtomicUsize = AtomicUsize::new(0);
 // IDK if this works
 /*lazy_static! {
     static ref CANVAS_LOCK: (AtomicBool, Condvar) = (AtomicBool::new(false), Condvar::new());
@@ -93,7 +93,7 @@ pub enum ResizeAxis {
     End,
 }
 
-#[derive(Clone, Debug)]
+/*#[derive(Clone, Debug)]
 enum Message {
     /// Tells the listener that something a modification is about to be
     /// made, and that it should now wait until updateLock is free
@@ -109,7 +109,7 @@ enum Message {
     End,
     // Redraw all characters
     //Redraw,
-}
+}*/
 
 /// The main element of this crate, the `Canvas` element draws to the canvas
 //#[derive(/*Clone, */Debug)]
@@ -154,12 +154,12 @@ pub struct Canvas {
     //      see https://www.reddit.com/r/rust/comments/f4zldz/i_audited_3_different_implementation_of_async/?utm_source=share&utm_medium=web2x&context=3
     //      but it is approximately what I want (behavior-wise, not intent-wise), so it's good
     //      enough for now.
-    update_lock: Arc<RwLock<()>>,
-    sender: Sender<Message>,
-    listener: Option<JoinHandle<()>>,
+    //update_lock: Arc<RwLock<()>>,
+    //sender: Sender<Message>,
+    //listener: Option<JoinHandle<()>>,
 }
 
-macro_rules! do_while {
+/*macro_rules! do_while {
     (do $block:block while $condition:expr;) => {
         let mut first = true;
         while first || ($condition) {
@@ -167,18 +167,20 @@ macro_rules! do_while {
             $block
         }
     };
-}
+}*/
 
 impl Canvas {
-    /// Creates a new canvas
+    /// Creates a new canvas.
+    /// 
+    /// Warning: Do not create more than one `Canvas` at a time
     pub fn new() -> Result<Self> {
         let mut out = stdout();
         //let out = out.lock();
         //let stdout_lock_ptr = &stdout_lock as *const StdoutLock<'_>;
-        if CANVAS_COUNT.fetch_add(1, Ordering::AcqRel) == 0 { 
+        //if CANVAS_COUNT.fetch_add(1, Ordering::AcqRel) == 0 { 
             execute!(out, EnterAlternateScreen, cursor::Hide)?;
             enable_raw_mode()?;
-        }
+        //}
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
             if !out.is_tty() {
@@ -188,14 +190,14 @@ impl Canvas {
         let changed = Arc::new(Mutex::new(HashSet::new()));
         let update_lock = Arc::new(RwLock::new(()));
         let layer_count = Arc::new(AtomicUsize::new(0));
-        let (sender, receiver) = channel();
-        let out_wrap = Arc::new(Mutex::new(out));
+        //let (sender, receiver) = channel();
+        //let out_wrap = Arc::new(Mutex::new(out));
         Ok(Self {
             //layers: Arc::clone(&layers),
             resize_type: ResizeType::Auto(ResizeAxis::Start, ResizeAxis::Start),
             changed: Arc::clone(&changed),
             layer_count: Arc::clone(&layer_count),
-            sender,
+            /*sender,
             update_lock: Arc::clone(&update_lock),
             // TODO: Add resize listener
             listener: Some(thread::spawn(move || {
@@ -285,7 +287,7 @@ impl Canvas {
 
                     out.flush().unwrap();
                 }
-            })),
+            })),*/
         })
     }
 
